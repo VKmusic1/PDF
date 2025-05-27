@@ -5,35 +5,41 @@ import asyncio
 import fitz  # PyMuPDF
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters
 )
 from docx import Document
 
-# Configuration from environment
-token = os.getenv("TOKEN")
-if not token:
+# Конфигурация из окружения
+TOKEN = os.getenv("TOKEN")
+if not TOKEN:
     raise RuntimeError("Environment variable TOKEN is required")
-host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-if not host:
-    raise RuntimeError("Environment variable RENDER_EXTERNAL_HOSTNAME is required")
-port = int(os.getenv("PORT", "10000"))
-webhook_url = f"https://{host}/{token}"
 
-# Logging setup
-logging.basicConfig(
-    format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO
-)
+HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+if not HOST:
+    raise RuntimeError("Environment variable RENDER_EXTERNAL_HOSTNAME is required")
+
+PORT = int(os.getenv("PORT", "10000"))
+WEBHOOK_URL = f"https://{HOST}/{TOKEN}"
+
+# Логирование
+logging.basicConfig(format="%(asctime)s %(levelname)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize Telegram Application
-app = Application.builder() 
-                .token(token) 
-                .connection_pool_size(100) 
-                .build()
+# Инициализация Telegram Application
+telegram_app = (
+    Application.builder()
+    .token(TOKEN)
+    .connection_pool_size(100)
+    .build()
+)
 
-# PDF Processing
-async def process_pdf(path: str):
+# Функция извлечения элементов PDF
+def extract_pdf_elements(path: str):
     doc = fitz.open(path)
     elements = []
     for page in doc:
@@ -47,16 +53,17 @@ async def process_pdf(path: str):
     doc.close()
     return elements
 
-async def send_content(update: Update, context: ContextTypes.DEFAULT_TYPE, elements):
-    # send text and images
+# Отправка содержимого
+async def send_elements(update: Update, context: ContextTypes.DEFAULT_TYPE, elements):
     sent = set()
     chat_id = update.effective_chat.id
     for typ, content in elements:
         if typ == "text":
-            for i in range(0, len(content), 4096):
-                await context.bot.send_message(chat_id, content[i:i+4096])
+            text = content
+            for i in range(0, len(text), 4096):
+                await context.bot.send_message(chat_id, text[i:i+4096])
                 await asyncio.sleep(0.1)
-        else:  # image
+        else:
             h = hash(content)
             if h in sent:
                 continue
@@ -65,18 +72,15 @@ async def send_content(update: Update, context: ContextTypes.DEFAULT_TYPE, eleme
             bio.name = "image.png"
             await context.bot.send_photo(chat_id, photo=bio)
             await asyncio.sleep(0.1)
-    # send buttons
-    kb = [
+    # Кнопки по завершении
+    keyboard = [
         [InlineKeyboardButton("Скачать в Word", callback_data="download_word")],
-        [InlineKeyboardButton("Загрузить ещё PDF-файл", callback_data="upload_pdf")]
+        [InlineKeyboardButton("Новый PDF", callback_data="new_pdf")]
     ]
-    markup = InlineKeyboardMarkup(kb)
-    await context.bot.send_message(
-        chat_id, "Ваш текст готов!", reply_markup=markup
-    )
+    await context.bot.send_message(chat_id, "Готово!", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# Convert to Word
-def elements_to_word(elements, out_path: str):
+# Конвертация в Word
+def convert_to_word(elements, out_path: str):
     docx = Document()
     for typ, content in elements:
         if typ == "text":
@@ -87,49 +91,75 @@ def elements_to_word(elements, out_path: str):
             docx.add_picture(bio)
     docx.save(out_path)
 
-# Handlers
+# Обработчики
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Привет! Отправь PDF-файл.")
 
 async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     if doc.mime_type != "application/pdf":
-        return await update.message.reply_text("Пожалуйста, PDF.")
-    await update.message.reply_text("Обработка...")
-    f = await doc.get_file()
+        return await update.message.reply_text("Пожалуйста, отправьте PDF.")
+    # Сохраняем PDF и предлагаем выбор
+    file = await doc.get_file()
     path = f"/tmp/{doc.file_unique_id}.pdf"
-    await f.download_to_drive(path)
-    elems = await process_pdf(path)
-    context.user_data["elems"] = elems
-    await send_content(update, context, elems)
+    await file.download_to_drive(path)
+    context.user_data['pdf_path'] = path
+    await update.message.reply_text(
+        "Выберите, что извлечь:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Только текст", callback_data="only_text")],
+            [InlineKeyboardButton("Текст + картинки", callback_data="text_images")]
+        ])
+    )
 
-async def button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    elems = context.user_data.get("elems") or []
-    if data == "download_word":
-        out = f"/tmp/{query.from_user.id}.docx"
-        elements_to_word(elems, out)
-        with open(out, "rb") as f:
-            await context.bot.send_document(
-                update.effective_chat.id,
-                document=InputFile(f, filename="converted.docx")
-            )
-    else:
-        await context.bot.send_message(update.effective_chat.id, "Отправьте новый PDF.")
+async def only_text_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    path = context.user_data.get('pdf_path')
+    if not path:
+        return await update.callback_query.edit_message_text("Файл не найден.")
+    elements = extract_pdf_elements(path)
+    text_only = [(t, c) for t, c in elements if t == "text"]
+    await send_elements(update, context, text_only)
+    context.user_data['elements'] = text_only
 
-# Register handlers
-app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
-app.add_handler(CallbackQueryHandler(button_cb))
+async def text_images_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    path = context.user_data.get('pdf_path')
+    if not path:
+        return await update.callback_query.edit_message_text("Файл не найден.")
+    elements = extract_pdf_elements(path)
+    await send_elements(update, context, elements)
+    context.user_data['elements'] = elements
 
-# Start webhook
+async def download_word_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    elements = context.user_data.get('elements', [])
+    if not elements:
+        return await update.callback_query.edit_message_text("Нет данных для конвертации.")
+    out = f"/tmp/{update.effective_user.id}.docx"
+    convert_to_word(elements, out)
+    with open(out, 'rb') as f:
+        await context.bot.send_document(update.effective_chat.id, InputFile(f, filename="converted.docx"))
+
+async def new_pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    context.user_data.clear()
+    await context.bot.send_message(update.effective_chat.id, "Отправьте новый PDF-файл.")
+
+# Регистрация хендлеров
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
+telegram_app.add_handler(CallbackQueryHandler(only_text_callback, pattern="only_text"))
+telegram_app.add_handler(CallbackQueryHandler(text_images_callback, pattern="text_images"))
+telegram_app.add_handler(CallbackQueryHandler(download_word_callback, pattern="download_word"))
+telegram_app.add_handler(CallbackQueryHandler(new_pdf_callback, pattern="new_pdf"))
+
+# Запуск webhook
 if __name__ == "__main__":
-    logger.info(f"Setting webhook: {webhook_url}")
-    app.run_webhook(
+    logger.info(f"Setting webhook to {WEBHOOK_URL}")
+    telegram_app.run_webhook(
         listen="0.0.0.0",
-        port=port,
-        url_path=token,
-        webhook_url=webhook_url,
+        port=PORT,
+        url_path=TOKEN,
+        webhook_url=WEBHOOK_URL
     )
