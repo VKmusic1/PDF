@@ -10,7 +10,6 @@ from telegram.ext import (
     filters, CallbackQueryHandler
 )
 from docx import Document
-import threading
 
 TOKEN = os.getenv("TOKEN", "ТВОЙ_ТОКЕН")
 PORT = int(os.getenv("PORT", 10000))
@@ -18,8 +17,6 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", f"https://pdf-rc9c.onrender.com/{TOKEN}")
 
 logging.basicConfig(level=logging.INFO)
 app_flask = Flask(__name__)
-
-# ========================== PDF PROCESS ===========================
 
 async def process_pdf(file_path):
     doc = fitz.open(file_path)
@@ -87,11 +84,14 @@ def elements_to_word(elements, output_path):
 # ========================== TELEGRAM HANDLERS ===========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logging.info("Старт")
     await update.message.reply_text(
         "Привет! Отправь мне PDF-файл, и я распознаю его содержимое."
     )
 
 async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logging.info("handle_pdf вызван")
+    print("handle_pdf вызван")
     file = update.message.document
     if not file.file_name.lower().endswith('.pdf'):
         await update.message.reply_text("Отправь именно PDF-файл.")
@@ -105,6 +105,7 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_pdf_content(update, context, elements)
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logging.info("button вызван")
     query = update.callback_query
     await query.answer()
     if query.data == 'download_word':
@@ -125,27 +126,30 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text="📄 Отправьте новый PDF-файл прямо в этот чат."
         )
 
+async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logging.info("Любое сообщение: %s", update)
+    print("Любое сообщение: %s" % update)
+
 # ========================== FLASK + WEBHOOK ===========================
 
 telegram_app = Application.builder().token(TOKEN).connection_pool_size(200).build()
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
 telegram_app.add_handler(CallbackQueryHandler(button))
+telegram_app.add_handler(MessageHandler(filters.ALL, any_message))
 
-# Глобальный event loop для всех задач Telegram
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
 @app_flask.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
+    logging.info("Webhook получен!")
+    print("Webhook получен!")
     update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-
     async def process():
         if not telegram_app._initialized:
             await telegram_app.initialize()
         await telegram_app.process_update(update)
-
-    # Не ждём выполнения, чтобы Telegram сразу получил ответ
     asyncio.run_coroutine_threadsafe(process(), loop)
     return "ok"
 
@@ -155,7 +159,6 @@ def ping():
 
 if __name__ == "__main__":
     import requests
-    # Устанавливаем webhook только при старте контейнера/процесса
     requests.post(
         f"https://api.telegram.org/bot{TOKEN}/setWebhook",
         data={"url": WEBHOOK_URL}
