@@ -12,11 +12,10 @@ from telegram.ext import (
 from docx import Document
 import threading
 
-TOKEN = os.getenv("TOKEN")
+TOKEN = os.getenv("TOKEN", "ТВОЙ_ТОКЕН")
 PORT = int(os.getenv("PORT", 10000))
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", f"https://pdf-rc9c.onrender.com/{TOKEN}")
 
-print("TOKEN:", TOKEN)
 logging.basicConfig(level=logging.INFO)
 app_flask = Flask(__name__)
 
@@ -133,7 +132,7 @@ telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
 telegram_app.add_handler(CallbackQueryHandler(button))
 
-# Глобальный event loop
+# Глобальный event loop для всех задач Telegram
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
@@ -146,8 +145,8 @@ def webhook():
             await telegram_app.initialize()
         await telegram_app.process_update(update)
 
-    future = asyncio.run_coroutine_threadsafe(process(), loop)
-    future.result()
+    # Не ждём выполнения, чтобы Telegram сразу получил ответ
+    asyncio.run_coroutine_threadsafe(process(), loop)
     return "ok"
 
 @app_flask.route("/ping")
@@ -155,11 +154,12 @@ def ping():
     return "pong"
 
 if __name__ == "__main__":
-    # Установим webhook (один раз при старте)
     import requests
+    # Устанавливаем webhook только при старте контейнера/процесса
     requests.post(
         f"https://api.telegram.org/bot{TOKEN}/setWebhook",
         data={"url": WEBHOOK_URL}
     )
     logging.info(f"Запускаем Flask на порту {PORT}, webhook={WEBHOOK_URL}")
+    print("TOKEN:", TOKEN)
     app_flask.run(host="0.0.0.0", port=PORT)
