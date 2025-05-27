@@ -1,222 +1,180 @@
 import os
+import io
 import logging
-import re
-import fitz
 import asyncio
-from aiohttp import web
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from flask import Flask, request
+import fitz  # PyMuPDF
+from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    filters,
-    ContextTypes,
+    Application, CommandHandler, MessageHandler, ContextTypes,
+    filters, CallbackQueryHandler
 )
-from PyPDF2 import PdfReader
+from docx import Document
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
+# Configuration
+token = os.getenv("TOKEN")
+if not token:
+    raise RuntimeError("Environment variable TOKEN is required")
+
+port = int(os.getenv("PORT", 10000))
+host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+if not host:
+    raise RuntimeError("Environment variable RENDER_EXTERNAL_HOSTNAME is required")
+webhook_url = f"https://{host}/{token}"
+
+# Logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+# Flask app
+app_flask = Flask(__name__)
+
+# Telegram Application
+telegram_app = (
+    Application.builder()
+    .token(token)
+    .connection_pool_size(200)
+    .build()
+)
+
+# PDF processing functions
+async def process_pdf(file_path):
+    doc = fitz.open(file_path)
+    elements = []
+    for page in doc:
+        text = page.get_text().strip()
+        if text:
+            elements.append(("text", text))
+        images = page.get_images(full=True)
+        for img in images:
+            xref = img[0]
+            img_data = doc.extract_image(xref)["image"]
+            elements.append(("img", img_data))
+    doc.close()
+    return elements
+
+async def send_pdf_content(update: Update, context: ContextTypes.DEFAULT_TYPE, elements):
+    sent_images = set()
+    for elem_type, content in elements:
+        if elem_type == "text":
+            text = content
+            for i in range(0, len(text), 4096):
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=text[i:i+4096]
+                )
+                await asyncio.sleep(0.1)
+        elif elem_type == "img":
+            h = hash(content)
+            if h in sent_images:
+                continue
+            sent_images.add(h)
+            bio = io.BytesIO(content)
+            bio.name = "image.png"
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=bio
+            )
+            await asyncio.sleep(0.2)
+    # Buttons
+    keyboard = [
+        [InlineKeyboardButton("Скачать в Word", callback_data="download_word")],
+        [InlineKeyboardButton("Загрузить ещё PDF-файл", callback_data="upload_pdf")]
+    ]
+    markup = InlineKeyboardMarkup(keyboard)
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="Ваш текст готов! Если хотите скачать в формате Word, нажмите на кнопку ниже.",
+        reply_markup=markup
+    )
+
+# Convert to Word
+def elements_to_word(elements, output_path):
+    docx = Document()
+    for elem_type, content in elements:
+        if elem_type == "text":
+            docx.add_paragraph(content)
+        elif elem_type == "img":
+            bio = io.BytesIO(content)
+            bio.name = "image.png"
+            docx.add_picture(bio)
+    docx.save(output_path)
+
+# Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Пришли мне PDF, и я спрошу что тебе нужно: только текст или текст с картинками."
+        "Привет! Отправь мне PDF-файл, и я распознаю его содержимое."
     )
 
 async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    doc_file = update.message.document
-    if doc_file.mime_type != "application/pdf":
-        await update.message.reply_text("Это не PDF.")
-        return
+    await update.message.reply_text("⏳ Обрабатываю PDF...")
+    doc = update.message.document
+    if doc.mime_type != "application/pdf":
+        return await update.message.reply_text("Пожалуйста, отправьте PDF-файл.")
+    file = await doc.get_file()
+    path = f"/tmp/{doc.file_unique_id}.pdf"
+    await file.download_to_drive(path)
+    elements = await process_pdf(path)
+    context.user_data["elements"] = elements
+    await send_pdf_content(update, context, elements)
 
-    file_path = f"/tmp/{doc_file.file_name}"
-    new_file = await context.bot.get_file(doc_file.file_id)
-    await new_file.download_to_drive(file_path)
-    context.user_data['pdf_path'] = file_path
-
-    # Спрашиваем, что нужно делать
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Только текст", callback_data="only_text")],
-        [InlineKeyboardButton("Текст и изображения", callback_data="text_images")],
-    ])
-    await update.message.reply_text(
-        "Что вы хотите получить из файла?",
-        reply_markup=keyboard
-    )
-
-async def only_text_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    file_path = context.user_data.get('pdf_path')
-    if not file_path:
-        return await query.edit_message_text("Файл не найден. Пришлите PDF заново.")
-
-    await query.edit_message_text("⏳ Извлекаю только текст...")
-
-    # Извлекаем только текст
-    try:
-        reader = PdfReader(file_path)
-        text = ""
-        for page in reader.pages:
-            page_text = page.extract_text() or ""
-            page_text = re.sub(r"(\w)-\n(\w)", r"\1\2", page_text)
-            page_text = page_text.replace("\n", " ")
-            page_text = re.sub(r" {2,}", " ", page_text).strip()
-            text += page_text + "\n"
-        text = text.strip()
-    except Exception as e:
-        return await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"Ошибка при чтении PDF: {e}"
-        )
-
-    if not text:
+    data = query.data
+    if data == "download_word":
+        elements = context.user_data.get("elements")
+        if not elements:
+            return await query.edit_message_text("Сначала отправьте PDF-файл.")
+        out_path = f"/tmp/{query.from_user.id}_converted.docx"
+        elements_to_word(elements, out_path)
+        with open(out_path, "rb") as f:
+            await context.bot.send_document(
+                chat_id=query.message.chat_id,
+                document=InputFile(f, filename="converted.docx")
+            )
+    elif data == "upload_pdf":
         await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Не удалось извлечь текст."
-        )
-        return
-
-    # Отправляем текст порциями
-    for i in range(0, len(text), 4096):
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=text[i:i+4096])
-
-    # Кнопка загрузить еще
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Загрузить ещё PDF-файл", callback_data="start_over")],
-    ])
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="Если нужно обработать ещё PDF — отправьте новый файл или нажмите кнопку ниже.",
-        reply_markup=keyboard
-    )
-
-async def text_images_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    file_path = context.user_data.get('pdf_path')
-    if not file_path:
-        return await query.edit_message_text("Файл не найден. Пришлите PDF заново.")
-
-    await query.edit_message_text("⏳ Извлекаю текст и изображения...")
-
-    # Извлекаем текст и картинки в порядке по страницам
-    import tempfile
-    reader = PdfReader(file_path)
-    pdf_doc = fitz.open(file_path)
-    sent_hashes = set()
-    num_pages = len(pdf_doc)
-    found_content = False
-
-    for i in range(num_pages):
-        # текст
-        page_text = ""
-        try:
-            page_text = reader.pages[i].extract_text() or ""
-            page_text = re.sub(r"(\w)-\n(\w)", r"\1\2", page_text)
-            page_text = page_text.replace("\n", " ")
-            page_text = re.sub(r" {2,}", " ", page_text).strip()
-        except Exception:
-            pass
-        if page_text:
-            found_content = True
-            for j in range(0, len(page_text), 4096):
-                await context.bot.send_message(chat_id=update.effective_chat.id, text=page_text[j:j+4096])
-        # картинки
-        for img in pdf_doc[i].get_images(full=True):
-            xref = img[0]
-            img_dict = pdf_doc.extract_image(xref)
-            img_bytes = img_dict['image']
-            ext = img_dict['ext']
-            img_hash = hash(img_bytes)
-            if img_hash not in sent_hashes:
-                found_content = True
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.' + ext) as tmp_img:
-                    tmp_img.write(img_bytes)
-                    tmp_img.flush()
-                    await context.bot.send_photo(
-                        chat_id=update.effective_chat.id,
-                        photo=tmp_img.name
-                    )
-                sent_hashes.add(img_hash)
-
-    if not found_content:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="В PDF не найдено текста или изображений."
+            chat_id=query.message.chat_id,
+            text="📄 Отправьте новый PDF-файл прямо в этот чат."
         )
 
-    # Кнопка загрузить еще
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Загрузить ещё PDF-файл", callback_data="start_over")],
-    ])
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="Если нужно обработать ещё PDF — отправьте новый файл или нажмите кнопку ниже.",
-        reply_markup=keyboard
+# Register handlers
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
+telegram_app.add_handler(CallbackQueryHandler(button))
+
+# Global event loop
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
+# Initialize application once
+async def init_app():
+    if not telegram_app._initialized:
+        await telegram_app.initialize()
+    logger.info("Telegram application initialized")
+
+loop.run_until_complete(init_app())
+
+# Flask routes
+@app_flask.route(f"/{token}", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+    # Process update asynchronously, respond immediately
+    asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
+    return "ok"
+
+@app_flask.route("/ping")
+def ping():
+    return "pong", 200
+
+# Start
+if __name__ == "__main__":
+    import requests
+    # Set webhook on startup
+    requests.post(
+        f"https://api.telegram.org/bot{token}/setWebhook",
+        data={"url": webhook_url}
     )
-
-async def start_over_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data.clear()
-    await query.edit_message_reply_markup(None)
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="🔄 Пришлите новый PDF-файл сюда."
-    )
-
-# ----------- ПИНГ-ПОНГ ----------
-async def ping(request):
-    return web.Response(text="pong")
-
-async def run_ping_server():
-    app = web.Application()
-    app.router.add_get('/ping', ping)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 8080)
-    await site.start()
-    print("Ping server running on /ping")
-    while True:
-        await asyncio.sleep(3600)
-
-# ----------- MAIN -----------
-def main():
-    token = os.getenv('TELEGRAM_BOT_TOKEN')
-    if not token:
-        logger.error('TELEGRAM_BOT_TOKEN не задан')
-        return
-
-    app = (
-        ApplicationBuilder()
-        .token(token)
-        .build()
-    )
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_pdf))
-    app.add_handler(CallbackQueryHandler(only_text_callback, pattern='only_text'))
-    app.add_handler(CallbackQueryHandler(text_images_callback, pattern='text_images'))
-    app.add_handler(CallbackQueryHandler(start_over_callback, pattern='start_over'))
-
-    host = os.getenv('RENDER_EXTERNAL_URL')
-    if not host:
-        logger.error('RENDER_EXTERNAL_URL не задан')
-        return
-    port = int(os.getenv('PORT', 5000))
-    webhook_url = f"{host}/{token}"
-
-    loop = asyncio.get_event_loop()
-    loop.create_task(run_ping_server())
-    app.run_webhook(
-        listen='0.0.0.0',
-        port=port,
-        url_path=token,
-        webhook_url=webhook_url
-    )
-
-if __name__ == '__main__':
-    main()
+    logger.info(f"Starting Flask on port {port}, webhook={webhook_url}")
+    app_flask.run(host="0.0.0.0", port=port)
