@@ -11,10 +11,13 @@ from telegram.ext import (
 )
 from docx import Document
 
-TOKEN = os.getenv("TOKEN", "ТВОЙ_ТОКЕН")
+# Получаем токен из переменной окружения
+TOKEN = os.getenv("TOKEN")
 PORT = int(os.getenv("PORT", 10000))
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", f"https://pdf-ghfk.onrender.com/{TOKEN}")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", f"https://pdf-rc9c.onrender.com/{TOKEN}")
 
+# Проверка токена при старте
+print("TOKEN:", TOKEN)
 logging.basicConfig(level=logging.INFO)
 app_flask = Flask(__name__)
 
@@ -42,7 +45,6 @@ async def send_pdf_content(update, context, elements):
     # Сначала текст и картинки по порядку
     for elem_type, content in elements:
         if elem_type == 'text':
-            # Дробим текст если длинный
             for i in range(0, len(content), 4096):
                 msg = await context.bot.send_message(
                     chat_id=update.effective_chat.id,
@@ -145,7 +147,7 @@ def ping():
     return "pong"
 
 if __name__ == "__main__":
-    # Установим webhook
+    # Установим webhook (один раз при старте)
     import requests
     requests.post(
         f"https://api.telegram.org/bot{TOKEN}/setWebhook",
