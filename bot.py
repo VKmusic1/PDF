@@ -10,13 +10,12 @@ from telegram.ext import (
     filters, CallbackQueryHandler
 )
 from docx import Document
+import threading
 
-# Получаем токен из переменной окружения
 TOKEN = os.getenv("TOKEN")
 PORT = int(os.getenv("PORT", 10000))
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", f"https://pdf-rc9c.onrender.com/{TOKEN}")
 
-# Проверка токена при старте
 print("TOKEN:", TOKEN)
 logging.basicConfig(level=logging.INFO)
 app_flask = Flask(__name__)
@@ -42,7 +41,6 @@ async def process_pdf(file_path):
 async def send_pdf_content(update, context, elements):
     sent_imgs = set()
     message_ids = []
-    # Сначала текст и картинки по порядку
     for elem_type, content in elements:
         if elem_type == 'text':
             for i in range(0, len(content), 4096):
@@ -65,7 +63,6 @@ async def send_pdf_content(update, context, elements):
             )
             message_ids.append(msg.message_id)
             await asyncio.sleep(0.5)
-    # Кнопки внизу
     keyboard = [
         [InlineKeyboardButton("Скачать в Word", callback_data='download_word')],
         [InlineKeyboardButton("Загрузить ещё PDF-файл", callback_data='upload_pdf')]
@@ -136,6 +133,10 @@ telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
 telegram_app.add_handler(CallbackQueryHandler(button))
 
+# Глобальный event loop
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
 @app_flask.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), telegram_app.bot)
@@ -145,7 +146,8 @@ def webhook():
             await telegram_app.initialize()
         await telegram_app.process_update(update)
 
-    asyncio.run(process())
+    future = asyncio.run_coroutine_threadsafe(process(), loop)
+    future.result()
     return "ok"
 
 @app_flask.route("/ping")
