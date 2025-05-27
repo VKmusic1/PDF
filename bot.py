@@ -139,7 +139,13 @@ telegram_app.add_handler(CallbackQueryHandler(button))
 @app_flask.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    asyncio.run(telegram_app.process_update(update))
+
+    async def process():
+        if not telegram_app._initialized:
+            await telegram_app.initialize()
+        await telegram_app.process_update(update)
+
+    asyncio.run(process())
     return "ok"
 
 @app_flask.route("/ping")
