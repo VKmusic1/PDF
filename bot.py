@@ -109,8 +109,8 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Выберите, что извлечь:",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Только текст", callback_data="only_text")],
-            [InlineKeyboardButton("Текст + картинки", callback_data="text_images")]
+            [InlineKeyboardButton("Только текст 🧾", callback_data="only_text")],
+            [InlineKeyboardButton("Текст + картинки 🖼", callback_data="text_images")]
         ])
     )
 
