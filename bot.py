@@ -10,7 +10,8 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     ContextTypes,
-    filters
+    filters,
+    Defaults
 )
 from docx import Document
 
@@ -30,15 +31,18 @@ WEBHOOK_URL = f"https://{HOST}/{TOKEN}"
 logging.basicConfig(format="%(asctime)s %(levelname)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# === Инициализация Telegram Application с увеличенными тайм-аутами ===
+# Тайм-ауты для запросов Telegram
+defaults = Defaults(request_kwargs={
+    "read_timeout": 60,     # ждать ответа до 60 секунд
+    "connect_timeout": 20   # ждать соединения до 20 секунд
+})
+
+# Инициализация Telegram Application с Defaults
 telegram_app = (
     Application.builder()
     .token(TOKEN)
     .connection_pool_size(100)
-    .request_kwargs({
-        "read_timeout": 60,
-        "connect_timeout": 20
-    })
+    .defaults(defaults)
     .build()
 )
 
@@ -98,13 +102,12 @@ def convert_to_word(elements, out_path: str):
             docx.add_picture(bio)
     docx.save(out_path)
 
-# Обработчик скачивания txt
+# Обработчик скачивания TXT
 async def download_txt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    elements = context.user_data.get('elements', [])
+    elements = context.user_data.get("elements", [])
     if not elements:
         return await update.callback_query.edit_message_text("Нет данных для конвертации.")
-    # Собираем только текстовые части
     all_text = ""
     for typ, content in elements:
         if typ == "text":
@@ -123,12 +126,12 @@ async def download_txt_callback(update: Update, context: ContextTypes.DEFAULT_TY
 # Обработчик скачивания Word
 async def download_word_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    elements = context.user_data.get('elements', [])
+    elements = context.user_data.get("elements", [])
     if not elements:
         return await update.callback_query.edit_message_text("Нет данных для конвертации.")
     out = f"/tmp/{update.effective_user.id}.docx"
     convert_to_word(elements, out)
-    with open(out, 'rb') as f:
+    with open(out, "rb") as f:
         await context.bot.send_document(update.effective_chat.id, InputFile(f, filename="converted.docx"))
 
 # Обработчик команды /start
@@ -140,38 +143,37 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     if doc.mime_type != "application/pdf":
         return await update.message.reply_text("Пожалуйста, отправьте PDF.")
-    # Сохраняем PDF и предлагаем выбор
     file = await doc.get_file()
     path = f"/tmp/{doc.file_unique_id}.pdf"
     await file.download_to_drive(path)
-    context.user_data['pdf_path'] = path
+    context.user_data["pdf_path"] = path
     await update.message.reply_text(
         "Выберите, что извлечь:",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Только текст 🧾", callback_data="only_text")],
-            [InlineKeyboardButton("Текст + картинки 🏞", callback_data="text_images")]
+            [InlineKeyboardButton("Только текст", callback_data="only_text")],
+            [InlineKeyboardButton("Текст + картинки", callback_data="text_images")]
         ])
     )
 
 # Обработка «Только текст»
 async def only_text_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    path = context.user_data.get('pdf_path')
+    path = context.user_data.get("pdf_path")
     if not path:
         return await update.callback_query.edit_message_text("Файл не найден.")
     elements = extract_pdf_elements(path)
     text_only = [(t, c) for t, c in elements if t == "text"]
-    context.user_data['elements'] = text_only
+    context.user_data["elements"] = text_only
     await send_elements(update, context, text_only)
 
 # Обработка «Текст + картинки»
 async def text_images_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    path = context.user_data.get('pdf_path')
+    path = context.user_data.get("pdf_path")
     if not path:
         return await update.callback_query.edit_message_text("Файл не найден.")
     elements = extract_pdf_elements(path)
-    context.user_data['elements'] = elements
+    context.user_data["elements"] = elements
     await send_elements(update, context, elements)
 
 # Обработка «Новый PDF»
