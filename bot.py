@@ -10,8 +10,7 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     ContextTypes,
-    filters,
-    Defaults
+    filters
 )
 from docx import Document
 
@@ -31,20 +30,18 @@ WEBHOOK_URL = f"https://{HOST}/{TOKEN}"
 logging.basicConfig(format="%(asctime)s %(levelname)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Тайм-ауты для запросов Telegram
-defaults = Defaults(request_kwargs={
-    "read_timeout": 60,     # ждать ответа до 60 секунд
-    "connect_timeout": 20   # ждать соединения до 20 секунд
-})
-
-# Инициализация Telegram Application с Defaults
+# === Инициализация Telegram Application ===
 telegram_app = (
     Application.builder()
     .token(TOKEN)
     .connection_pool_size(100)
-    .defaults(defaults)
     .build()
 )
+# Увеличиваем тайм-ауты после сборки
+telegram_app.request_kwargs = {
+    "read_timeout": 60,
+    "connect_timeout": 20
+}
 
 # Функция извлечения элементов PDF
 def extract_pdf_elements(path: str):
