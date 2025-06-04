@@ -30,11 +30,15 @@ WEBHOOK_URL = f"https://{HOST}/{TOKEN}"
 logging.basicConfig(format="%(asctime)s %(levelname)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Инициализация Telegram Application
+# === Инициализация Telegram Application с увеличенными тайм-аутами ===
 telegram_app = (
     Application.builder()
     .token(TOKEN)
     .connection_pool_size(100)
+    .request_kwargs({
+        "read_timeout": 60,
+        "connect_timeout": 20
+    })
     .build()
 )
 
@@ -144,8 +148,8 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Выберите, что извлечь:",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Только текст", callback_data="only_text")],
-            [InlineKeyboardButton("Текст + картинки", callback_data="text_images")]
+            [InlineKeyboardButton("Только текст 🧾", callback_data="only_text")],
+            [InlineKeyboardButton("Текст + картинки 🏞", callback_data="text_images")]
         ])
     )
 
