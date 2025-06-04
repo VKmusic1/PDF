@@ -74,8 +74,8 @@ async def send_elements(update: Update, context: ContextTypes.DEFAULT_TYPE, elem
             await asyncio.sleep(0.1)
     # Кнопки по завершении
     keyboard = [
-        [InlineKeyboardButton("Скачать в Word", callback_data="download_word")],
-        [InlineKeyboardButton("Новый PDF", callback_data="new_pdf")]
+        [InlineKeyboardButton("Скачать в Word 💾", callback_data="download_word")],
+        [InlineKeyboardButton("Новый PDF 🔖", callback_data="new_pdf")]
     ]
     await context.bot.send_message(chat_id, "Готово!", reply_markup=InlineKeyboardMarkup(keyboard))
 
