@@ -3,6 +3,8 @@ import io
 import logging
 import asyncio
 import fitz  # PyMuPDF
+import pdfplumber
+import pandas as pd
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -30,20 +32,20 @@ WEBHOOK_URL = f"https://{HOST}/{TOKEN}"
 logging.basicConfig(format="%(asctime)s %(levelname)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# === Инициализация Telegram Application ===
+# Инициализация Telegram Application
 telegram_app = (
     Application.builder()
     .token(TOKEN)
     .connection_pool_size(100)
     .build()
 )
-# Увеличиваем тайм-ауты после сборки
+# Увеличиваем тайм-ауты
 telegram_app.request_kwargs = {
     "read_timeout": 60,
     "connect_timeout": 20
 }
 
-# Функция извлечения элементов PDF
+# Функция извлечения элементов PDF (текст + картинки)
 def extract_pdf_elements(path: str):
     doc = fitz.open(path)
     elements = []
@@ -77,10 +79,12 @@ async def send_elements(update: Update, context: ContextTypes.DEFAULT_TYPE, elem
             bio.name = "image.png"
             await context.bot.send_photo(chat_id, photo=bio)
             await asyncio.sleep(0.1)
+
     # Кнопки по завершении
     keyboard = [
         [InlineKeyboardButton("Скачать в Word 💾", callback_data="download_word")],
         [InlineKeyboardButton("Скачать в TXT 📄", callback_data="download_txt")],
+        [InlineKeyboardButton("Скачать таблицы 📊", callback_data="download_tables")],
         [InlineKeyboardButton("Новый PDF 🔖", callback_data="new_pdf")]
     ]
     await context.bot.send_message(chat_id, "Готово!", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -131,6 +135,39 @@ async def download_word_callback(update: Update, context: ContextTypes.DEFAULT_T
     with open(out, "rb") as f:
         await context.bot.send_document(update.effective_chat.id, InputFile(f, filename="converted.docx"))
 
+# Обработчик скачивания таблиц (Excel)
+async def download_tables_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    path = context.user_data.get("pdf_path")
+    if not path:
+        return await update.callback_query.edit_message_text("PDF не найден.")
+    # Открываем PDF через pdfplumber и собираем все таблицы
+    all_tables = []
+    with pdfplumber.open(path) as pdf:
+        for page_number, page in enumerate(pdf.pages, start=1):
+            tables = page.extract_tables()
+            for tbl_idx, table in enumerate(tables, start=1):
+                # Первая строка — заголовок
+                if not table or len(table) < 2:
+                    continue
+                df = pd.DataFrame(table[1:], columns=table[0])
+                sheet_name = f"Стр{page_number}_Таб{tbl_idx}"
+                all_tables.append((sheet_name, df))
+    if not all_tables:
+        return await update.callback_query.edit_message_text("В PDF нет распознаваемых таблиц.")
+    excel_path = f"/tmp/{update.effective_user.id}_tables.xlsx"
+    # Сохраняем каждую таблицу на отдельном листе
+    with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
+        for sheet_name, df in all_tables:
+            # Обрезаем длину имени листа до 31 символа (ограничение Excel)
+            safe_name = sheet_name[:31]
+            df.to_excel(writer, sheet_name=safe_name, index=False)
+    with open(excel_path, "rb") as f:
+        await context.bot.send_document(
+            update.effective_chat.id,
+            document=InputFile(f, filename="tables.xlsx")
+        )
+
 # Обработчик команды /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Привет! Отправь PDF-файл.")
@@ -173,13 +210,16 @@ async def text_images_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["elements"] = elements
     await send_elements(update, context, elements)
 
+# «Скачать таблицы»
+telegram_app.add_handler(CallbackQueryHandler(download_tables_callback, pattern="download_tables"))
+
 # Обработка «Новый PDF»
 async def new_pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     context.user_data.clear()
     await context.bot.send_message(update.effective_chat.id, "Отправьте новый PDF-файл.")
 
-# Регистрация хендлеров
+# Регистрация остальных хендлеров
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
 telegram_app.add_handler(CallbackQueryHandler(only_text_callback, pattern="only_text"))
