@@ -54,6 +54,7 @@ telegram_app.request_kwargs = {
 # ————————————————————
 # 4. Функции для работы с PDF
 # ————————————————————
+
 def extract_pdf_elements(path: str):
     doc = fitz.open(path)
     elements = []
@@ -101,6 +102,7 @@ async def send_elements(update: Update, context: ContextTypes.DEFAULT_TYPE, elem
     )
     await context.bot.send_message(chat_id, "Чтобы пользоваться ботом, нажмите /start", timeout=60)
 
+# Конвертация в Word
 def convert_to_word(elements, out_path: str):
     docx = Document()
     for typ, content in elements:
@@ -117,12 +119,12 @@ def convert_to_word(elements, out_path: str):
 # ————————————————————
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Отправь PDF-файл.", timeout=60)
+    await update.message.reply_text("Привет! Отправь PDF-файл.")
 
 async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     if doc.mime_type != "application/pdf":
-        return await update.message.reply_text("Пожалуйста, отправьте PDF.", timeout=60)
+        return await update.message.reply_text("Пожалуйста, отправьте PDF.")
 
     file = await doc.get_file()
     path = f"/tmp/{doc.file_unique_id}.pdf"
@@ -134,15 +136,14 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("Только текст", callback_data="only_text")],
             [InlineKeyboardButton("Текст + картинки", callback_data="text_images")]
-        ]),
-        timeout=60
+        ])
     )
 
 async def only_text_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     path = context.user_data.get("pdf_path")
     if not path:
-        return await update.callback_query.edit_message_text("Файл не найден.", timeout=60)
+        return await update.callback_query.edit_message_text("Файл не найден.")
 
     elements = extract_pdf_elements(path)
     text_only = [(t, c) for t, c in elements if t == "text"]
@@ -153,7 +154,7 @@ async def text_images_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.callback_query.answer()
     path = context.user_data.get("pdf_path")
     if not path:
-        return await update.callback_query.edit_message_text("Файл не найден.", timeout=60)
+        return await update.callback_query.edit_message_text("Файл не найден.")
 
     elements = extract_pdf_elements(path)
     context.user_data["elements"] = elements
@@ -163,14 +164,14 @@ async def download_txt_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await update.callback_query.answer()
     elements = context.user_data.get("elements", [])
     if not elements:
-        return await update.callback_query.edit_message_text("Нет данных для конвертации.", timeout=60)
+        return await update.callback_query.edit_message_text("Нет данных для конвертации.")
 
     all_text = ""
     for typ, content in elements:
         if typ == "text":
             all_text += content + "\n\n"
     if not all_text:
-        return await update.callback_query.edit_message_text("В PDF нет текста.", timeout=60)
+        return await update.callback_query.edit_message_text("В PDF нет текста.")
 
     out_path = f"/tmp/{update.effective_user.id}.txt"
     with open(out_path, "w", encoding="utf-8") as f:
@@ -186,7 +187,7 @@ async def download_word_callback(update: Update, context: ContextTypes.DEFAULT_T
     await update.callback_query.answer()
     elements = context.user_data.get("elements", [])
     if not elements:
-        return await update.callback_query.edit_message_text("Нет данных для конвертации.", timeout=60)
+        return await update.callback_query.edit_message_text("Нет данных для конвертации.")
 
     out = f"/tmp/{update.effective_user.id}.docx"
     convert_to_word(elements, out)
@@ -201,7 +202,7 @@ async def download_tables_callback(update: Update, context: ContextTypes.DEFAULT
     await update.callback_query.answer()
     path = context.user_data.get("pdf_path")
     if not path:
-        return await update.callback_query.edit_message_text("PDF не найден.", timeout=60)
+        return await update.callback_query.edit_message_text("PDF не найден.")
 
     all_tables = []
     with pdfplumber.open(path) as pdf:
@@ -215,7 +216,7 @@ async def download_tables_callback(update: Update, context: ContextTypes.DEFAULT
                 all_tables.append((sheet_name, df))
 
     if not all_tables:
-        return await update.callback_query.edit_message_text("В PDF нет распознаваемых таблиц.", timeout=60)
+        return await update.callback_query.edit_message_text("В PDF нет распознаваемых таблиц.")
 
     excel_path = f"/tmp/{update.effective_user.id}_tables.xlsx"
     with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
@@ -233,7 +234,7 @@ async def download_tables_callback(update: Update, context: ContextTypes.DEFAULT
 async def new_pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     context.user_data.clear()
-    await context.bot.send_message(update.effective_chat.id, "Отправьте новый PDF-файл.", timeout=60)
+    await context.bot.send_message(update.effective_chat.id, "Отправьте новый PDF-файл.")
 
 # ————————————————————
 # 6. Регистрация хендлеров
