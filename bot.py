@@ -44,8 +44,7 @@ telegram_app = (
     .connection_pool_size(100)
     .build()
 )
-# Тайм-ауты оставляем только для внутренних http-запросов PTB, 
-# но не передаём их в сами send_document/send_photo/send_message
+# Тайм-ауты для внутренних HTTP-запросов PTB (не передаются в сами send_*)
 telegram_app.request_kwargs = {
     "read_timeout": 60,
     "connect_timeout": 20
@@ -74,8 +73,8 @@ def extract_pdf_elements(path: str):
 def convert_to_word(elements, out_path: str):
     """
     Конвертирует список элементов в DOCX:
-    - текст -> параграфы;
-    - картинки -> вставляет в документ.
+    - текст → параграфы
+    - картинки → вставляет в документ
     """
     docx = Document()
     for typ, content in elements:
@@ -99,13 +98,13 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     При получении PDF:
      - сохраняем во /tmp
-     - показываем кнопки выбора:
-         • Скачать текст и картинки в Word
-         • Скачать текст TXT
-         • Скачать просто текст
-         • Скачать текст и картинки в чат
-         • Скачать таблицу в Excel
-         • Новый PDF
+     - показываем кнопки выбора (с новыми подписями и смайлами):
+         • Скачать текст и картинки в Word 📄
+         • Скачать текст в TXT 📄
+         • Скачать Таблицу в Excel 📊
+         • Скачать просто текст в этот чат 📝
+         • Скачать текст и картинки в этот чат 🖼️📝
+         • Новый PDF 🔄
     """
     logger.info("Получен документ от %s", update.effective_user.id)
     doc = update.message.document
@@ -117,12 +116,12 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["pdf_path"] = path
 
     keyboard = [
-        [InlineKeyboardButton("Скачать текст и картинки в Word", callback_data="cb_word_all")],
-        [InlineKeyboardButton("Скачать текст TXT", callback_data="cb_txt")],
-        [InlineKeyboardButton("Скачать просто текст", callback_data="cb_text_only")],
-        [InlineKeyboardButton("Скачать текст и картинки в чат", callback_data="cb_chat_all")],
-        [InlineKeyboardButton("Скачать таблицу в Excel", callback_data="cb_tables")],
-        [InlineKeyboardButton("Новый PDF", callback_data="cb_new_pdf")],
+        [InlineKeyboardButton("Скачать текст и картинки в Word 📄", callback_data="cb_word_all")],
+        [InlineKeyboardButton("Скачать текст в TXT 📄", callback_data="cb_txt")],
+        [InlineKeyboardButton("Скачать Таблицу в Excel 📊", callback_data="cb_tables")],
+        [InlineKeyboardButton("Скачать просто текст в этот чат 📝", callback_data="cb_text_only")],
+        [InlineKeyboardButton("Скачать текст и картинки в этот чат 🖼️📝", callback_data="cb_chat_all")],
+        [InlineKeyboardButton("Новый PDF 🔄", callback_data="cb_new_pdf")],
     ]
     await update.message.reply_text(
         "Выбери, что сделать с этим PDF:",
