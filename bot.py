@@ -44,7 +44,7 @@ telegram_app = (
     .connection_pool_size(100)
     .build()
 )
-# Увеличиваем тайм­-ауты для всех произвольных запросов (send_document, send_photo и т.п.)
+# Увеличиваем тайм-ауты для send_photo и send_document
 telegram_app.request_kwargs = {
     "read_timeout": 60,
     "connect_timeout": 20
@@ -72,10 +72,10 @@ def extract_pdf_elements(path: str):
 async def send_elements(update: Update, context: ContextTypes.DEFAULT_TYPE, elements):
     """
     Проходит по списку elements и отправляет:
-     - каждый текст по 4096 символов
+     - каждый блок текста по 4096 символов
      - каждую картинку
-    После этого выводятся четыре кнопки: 
-      «Скачать в Word», «Скачать в TXT», «Скачать таблицы», «Новый PDF»
+    После этого выводит четыре кнопки:
+     «Скачать в Word», «Скачать в TXT», «Скачать таблицы», «Новый PDF»
     и подпись «Чтобы пользоваться ботом, нажмите /start».
     """
     sent = set()
@@ -85,7 +85,8 @@ async def send_elements(update: Update, context: ContextTypes.DEFAULT_TYPE, elem
         if typ == "text":
             text = content
             for i in range(0, len(text), 4096):
-                await context.bot.send_message(chat_id, text[i:i+4096], timeout=60)
+                # send_message не принимает timeout
+                await context.bot.send_message(chat_id, text[i:i+4096])
                 await asyncio.sleep(0.1)
         else:
             h = hash(content)
@@ -94,6 +95,7 @@ async def send_elements(update: Update, context: ContextTypes.DEFAULT_TYPE, elem
             sent.add(h)
             bio = io.BytesIO(content)
             bio.name = "image.png"
+            # send_photo поддерживает timeout
             await context.bot.send_photo(chat_id, photo=bio, timeout=60)
             await asyncio.sleep(0.1)
 
@@ -106,16 +108,15 @@ async def send_elements(update: Update, context: ContextTypes.DEFAULT_TYPE, elem
     await context.bot.send_message(
         chat_id,
         "Готово!",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        timeout=60
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    await context.bot.send_message(chat_id, "Чтобы пользоваться ботом, нажмите /start", timeout=60)
+    await context.bot.send_message(chat_id, "Чтобы пользоваться ботом, нажмите /start")
 
 def convert_to_word(elements, out_path: str):
     """
-    Конвертирует список элементов в DOCX: 
+    Конвертирует список элементов в DOCX:
     - текст -> параграфы
-    - изображения -> в документ
+    - изображения -> вставляет в документ
     """
     docx = Document()
     for typ, content in elements:
@@ -138,8 +139,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Обработчик прихода PDF:
-     - сохраняет его во /tmp
-     - предлагает выбрать «Только текст» или «Текст + картинки»
+    - сохраняет его во /tmp
+    - предлагает выбрать «Только текст» или «Текст + картинки»
     """
     logger.info("Получен документ от %s", update.effective_user.id)
     doc = update.message.document
@@ -161,9 +162,9 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def only_text_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     При нажатии «Только текст»:
-     - извлекает только текст
-     - сохраняет в context.user_data['elements']
-     - вызывает send_elements()
+    - извлекает исключительно текст
+    - сохраняет его в context.user_data['elements']
+    - вызывает send_elements() для вывода
     """
     logger.info("Callback only_text от %s", update.effective_user.id)
     await update.callback_query.answer()
@@ -178,9 +179,9 @@ async def only_text_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def text_images_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     При нажатии «Текст + картинки»:
-     - извлекает и текст, и картинки
-     - сохраняет в context.user_data['elements']
-     - вызывает send_elements()
+    - извлекает и текст, и картинки
+    - сохраняет их в context.user_data['elements']
+    - вызывает send_elements()
     """
     logger.info("Callback text_images от %s", update.effective_user.id)
     await update.callback_query.answer()
@@ -194,9 +195,9 @@ async def text_images_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 async def download_txt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     При нажатии «Скачать в TXT»:
-     - собирает весь текст из context.user_data['elements']
-     - записывает его в /tmp/USER_ID.txt
-     - отправляет файл через send_document(timeout=120)
+    - собирает текст из context.user_data['elements']
+    - записывает в /tmp/USER_ID.txt
+    - отправляет через send_document(timeout=60)
     """
     logger.info("Callback download_txt от %s", update.effective_user.id)
     await update.callback_query.answer()
@@ -216,14 +217,14 @@ async def download_txt_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await context.bot.send_document(
             update.effective_chat.id,
             document=InputFile(f, filename="converted.txt"),
-            timeout=120
+            timeout=60
         )
 
 async def download_word_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     При нажатии «Скачать в Word»:
-     - конвертирует user_data['elements'] в DOCX
-     - отправляет его через send_document(timeout=120)
+    - конвертирует элементы в DOCX
+    - отправляет через send_document(timeout=60)
     """
     logger.info("Callback download_word от %s", update.effective_user.id)
     await update.callback_query.answer()
@@ -236,16 +237,16 @@ async def download_word_callback(update: Update, context: ContextTypes.DEFAULT_T
         await context.bot.send_document(
             update.effective_chat.id,
             document=InputFile(f, filename="converted.docx"),
-            timeout=120
+            timeout=60
         )
 
 async def download_tables_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     При нажатии «Скачать таблицы»:
-     - открывает PDF через pdfplumber
-     - для каждой страницы извлекает таблицы (extract_tables)
-     - каждую таблицу кладёт в отдельный лист Excel (openpyxl)
-     - отправляет итоговый .xlsx через send_document(timeout=120)
+    - открывает PDF через pdfplumber
+    - извлекает все таблицы (extract_tables)
+    - сохраняет в один Excel (каждая таблица на отдельном листе)
+    - отправляет через send_document(timeout=60)
     """
     logger.info("Callback download_tables от %s", update.effective_user.id)
     await update.callback_query.answer()
@@ -268,25 +269,25 @@ async def download_tables_callback(update: Update, context: ContextTypes.DEFAULT
     excel_path = f"/tmp/{update.effective_user.id}_tables.xlsx"
     with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
         for sheet_name, df in all_tables:
-            safe_name = sheet_name[:31]  # Ограничение Excel в 31 символ
+            safe_name = sheet_name[:31]  # Ограничение Excel (31 символ)
             df.to_excel(writer, sheet_name=safe_name, index=False)
     with open(excel_path, "rb") as f:
         await context.bot.send_document(
             update.effective_chat.id,
             document=InputFile(f, filename="tables.xlsx"),
-            timeout=120
+            timeout=60
         )
 
 async def new_pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     При нажатии «Новый PDF»:
-     - очищает user_data
-     - просит пользователя загрузить новый файл
+    - очищает user_data
+    - просит пользователя загрузить новый
     """
     logger.info("Callback new_pdf от %s", update.effective_user.id)
     await update.callback_query.answer()
     context.user_data.clear()
-    await context.bot.send_message(update.effective_chat.id, "Отправьте новый PDF-файл.", timeout=60)
+    await context.bot.send_message(update.effective_chat.id, "Отправьте новый PDF-файл.")
 
 # ---------------------- 6. Регистрация хендлеров ----------------------
 telegram_app.add_handler(CommandHandler("start", start))
