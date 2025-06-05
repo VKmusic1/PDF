@@ -204,9 +204,12 @@ def ping():
 @app.route(f"/{TOKEN}", methods=["POST"])
 def telegram_webhook():
     update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    # Важно: использовать global event loop, чтобы avoid "no event loop"!
-    loop = asyncio.get_event_loop()
-    loop.create_task(telegram_app.process_update(update))
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    loop.run_until_complete(telegram_app.process_update(update))
     return "ok"
 
 # ---- Запуск ----
