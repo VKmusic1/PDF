@@ -1,6 +1,7 @@
 import os
 import io
 import logging
+import asyncio
 import fitz                  # PyMuPDF
 import pdfplumber
 import pandas as pd
@@ -43,7 +44,8 @@ telegram_app = (
     .connection_pool_size(100)
     .build()
 )
-# Тайм-ауты для send_document (большие файлы)
+# Тайм-ауты оставляем только для внутренних http-запросов PTB, 
+# но не передаём их в сами send_document/send_photo/send_message
 telegram_app.request_kwargs = {
     "read_timeout": 60,
     "connect_timeout": 20
@@ -52,8 +54,9 @@ telegram_app.request_kwargs = {
 # ---------------------- 4. Функции для работы с PDF ----------------------
 def extract_pdf_elements(path: str):
     """
-    Открывает PDF через PyMuPDF, возвращает список элементов:
-    ('text', строка текста) или ('img', bytes_изображения).
+    Открывает PDF через PyMuPDF и возвращает список элементов:
+    - ('text', строка)
+    - ('img', bytes изображения)
     """
     doc = fitz.open(path)
     elements = []
@@ -71,8 +74,8 @@ def extract_pdf_elements(path: str):
 def convert_to_word(elements, out_path: str):
     """
     Конвертирует список элементов в DOCX:
-    - текст -> параграфы
-    - изображения -> вставляет в документ
+    - текст -> параграфы;
+    - картинки -> вставляет в документ.
     """
     docx = Document()
     for typ, content in elements:
@@ -97,12 +100,12 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     При получении PDF:
      - сохраняем во /tmp
      - показываем кнопки выбора:
-         Скачать текст и картинки в Word
-         Скачать текст TXT
-         Скачать просто текст
-         Скачать текст и картинки в этот чат
-         Скачать таблицу в Excel
-         Новый PDF
+         • Скачать текст и картинки в Word
+         • Скачать текст TXT
+         • Скачать просто текст
+         • Скачать текст и картинки в чат
+         • Скачать таблицу в Excel
+         • Новый PDF
     """
     logger.info("Получен документ от %s", update.effective_user.id)
     doc = update.message.document
@@ -140,7 +143,6 @@ async def cb_text_only(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text_only = [c for t, c in elements if t == "text"]
     if not text_only:
         return await context.bot.send_message(update.effective_chat.id, "В PDF нет текста.")
-    # Отправляем текст порционно
     for block in text_only:
         for i in range(0, len(block), 4096):
             await context.bot.send_message(update.effective_chat.id, block[i:i+4096])
@@ -193,8 +195,7 @@ async def cb_word_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(out, "rb") as f:
         await context.bot.send_document(
             update.effective_chat.id,
-            document=InputFile(f, filename="full_converted.docx"),
-            timeout=60
+            document=InputFile(f, filename="full_converted.docx")
         )
 
 async def cb_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -218,8 +219,7 @@ async def cb_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(out_path, "rb") as f:
         await context.bot.send_document(
             update.effective_chat.id,
-            document=InputFile(f, filename="full_converted.txt"),
-            timeout=60
+            document=InputFile(f, filename="full_converted.txt")
         )
 
 async def cb_tables(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -252,8 +252,7 @@ async def cb_tables(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(excel_path, "rb") as f:
         await context.bot.send_document(
             update.effective_chat.id,
-            document=InputFile(f, filename="tables.xlsx"),
-            timeout=60
+            document=InputFile(f, filename="tables.xlsx")
         )
 
 async def cb_new_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
