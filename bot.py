@@ -184,7 +184,8 @@ telegram_app.add_handler(CallbackQueryHandler(cb_chat_text, pattern="chat_text")
 telegram_app.add_handler(CallbackQueryHandler(cb_chat_all, pattern="chat_all"))
 telegram_app.add_handler(CallbackQueryHandler(cb_new_pdf, pattern="new_pdf"))
 
-loop = telegram_app.loop
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
 
 async def init_telegram():
     await telegram_app.initialize()
