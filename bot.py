@@ -204,8 +204,8 @@ loop.run_until_complete(init_telegram())
 @app_flask.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    fut = asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
-    fut.result()
+    # НЕ ЖДЁМ ОТВЕТА, сразу отдаём "ok"!
+    asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
     return "ok"
 
 @app_flask.route("/ping")
