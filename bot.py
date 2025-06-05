@@ -44,7 +44,7 @@ telegram_app = (
     .connection_pool_size(100)
     .build()
 )
-# Увеличиваем тайм-ауты для send_photo и send_document
+# Тайм-ауты для send_document (все остальные вызовы идут без timeout)
 telegram_app.request_kwargs = {
     "read_timeout": 60,
     "connect_timeout": 20
@@ -71,12 +71,12 @@ def extract_pdf_elements(path: str):
 
 async def send_elements(update: Update, context: ContextTypes.DEFAULT_TYPE, elements):
     """
-    Проходит по списку elements и отправляет:
-     - каждый блок текста по 4096 символов
+    Проходит по списку элементов и отправляет:
+     - каждый текст по 4096 символов
      - каждую картинку
     После этого выводит четыре кнопки:
      «Скачать в Word», «Скачать в TXT», «Скачать таблицы», «Новый PDF»
-    и подпись «Чтобы пользоваться ботом, нажмите /start».
+    и сообщение «Чтобы пользоваться ботом, нажмите /start».
     """
     sent = set()
     chat_id = update.effective_chat.id
@@ -85,7 +85,6 @@ async def send_elements(update: Update, context: ContextTypes.DEFAULT_TYPE, elem
         if typ == "text":
             text = content
             for i in range(0, len(text), 4096):
-                # send_message не принимает timeout
                 await context.bot.send_message(chat_id, text[i:i+4096])
                 await asyncio.sleep(0.1)
         else:
@@ -95,8 +94,7 @@ async def send_elements(update: Update, context: ContextTypes.DEFAULT_TYPE, elem
             sent.add(h)
             bio = io.BytesIO(content)
             bio.name = "image.png"
-            # send_photo поддерживает timeout
-            await context.bot.send_photo(chat_id, photo=bio, timeout=60)
+            await context.bot.send_photo(chat_id, photo=bio)
             await asyncio.sleep(0.1)
 
     keyboard = [
@@ -132,15 +130,15 @@ def convert_to_word(elements, out_path: str):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Обработчик команды /start
+    /start
     """
     await update.message.reply_text("Привет! Отправь PDF-файл.")
 
 async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Обработчик прихода PDF:
-    - сохраняет его во /tmp
-    - предлагает выбрать «Только текст» или «Текст + картинки»
+    При получении PDF:
+     - сохраняет файл во /tmp
+     - предлагает кнопку «Только текст» и «Текст + картинки»
     """
     logger.info("Получен документ от %s", update.effective_user.id)
     doc = update.message.document
@@ -162,9 +160,8 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def only_text_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     При нажатии «Только текст»:
-    - извлекает исключительно текст
-    - сохраняет его в context.user_data['elements']
-    - вызывает send_elements() для вывода
+     - извлекает только текстовые блоки
+     - вызывает send_elements()
     """
     logger.info("Callback only_text от %s", update.effective_user.id)
     await update.callback_query.answer()
@@ -179,9 +176,8 @@ async def only_text_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def text_images_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     При нажатии «Текст + картинки»:
-    - извлекает и текст, и картинки
-    - сохраняет их в context.user_data['elements']
-    - вызывает send_elements()
+     - извлекает и текст, и картинки
+     - вызывает send_elements()
     """
     logger.info("Callback text_images от %s", update.effective_user.id)
     await update.callback_query.answer()
@@ -195,9 +191,9 @@ async def text_images_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 async def download_txt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     При нажатии «Скачать в TXT»:
-    - собирает текст из context.user_data['elements']
-    - записывает в /tmp/USER_ID.txt
-    - отправляет через send_document(timeout=60)
+     - собирает весь текст
+     - записывает в /tmp/USER_ID.txt
+     - отправляет через send_document(timeout=60)
     """
     logger.info("Callback download_txt от %s", update.effective_user.id)
     await update.callback_query.answer()
@@ -223,8 +219,8 @@ async def download_txt_callback(update: Update, context: ContextTypes.DEFAULT_TY
 async def download_word_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     При нажатии «Скачать в Word»:
-    - конвертирует элементы в DOCX
-    - отправляет через send_document(timeout=60)
+     - конвертирует элементы в DOCX
+     - отправляет через send_document(timeout=60)
     """
     logger.info("Callback download_word от %s", update.effective_user.id)
     await update.callback_query.answer()
@@ -243,10 +239,9 @@ async def download_word_callback(update: Update, context: ContextTypes.DEFAULT_T
 async def download_tables_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     При нажатии «Скачать таблицы»:
-    - открывает PDF через pdfplumber
-    - извлекает все таблицы (extract_tables)
-    - сохраняет в один Excel (каждая таблица на отдельном листе)
-    - отправляет через send_document(timeout=60)
+     - извлекает таблицы через pdfplumber,
+     - кладёт их в Excel (openpyxl),
+     - отправляет через send_document(timeout=60)
     """
     logger.info("Callback download_tables от %s", update.effective_user.id)
     await update.callback_query.answer()
@@ -269,7 +264,7 @@ async def download_tables_callback(update: Update, context: ContextTypes.DEFAULT
     excel_path = f"/tmp/{update.effective_user.id}_tables.xlsx"
     with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
         for sheet_name, df in all_tables:
-            safe_name = sheet_name[:31]  # Ограничение Excel (31 символ)
+            safe_name = sheet_name[:31]  # ограничение Excel: 31 символ
             df.to_excel(writer, sheet_name=safe_name, index=False)
     with open(excel_path, "rb") as f:
         await context.bot.send_document(
@@ -281,8 +276,8 @@ async def download_tables_callback(update: Update, context: ContextTypes.DEFAULT
 async def new_pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     При нажатии «Новый PDF»:
-    - очищает user_data
-    - просит пользователя загрузить новый
+     - очищает user_data,
+     - просит загрузить новый файл.
     """
     logger.info("Callback new_pdf от %s", update.effective_user.id)
     await update.callback_query.answer()
