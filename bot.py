@@ -195,7 +195,7 @@ loop.run_until_complete(init_telegram())
 def webhook():
     update = Update.de_json(request.get_json(force=True), telegram_app.bot)
     # Обработка апдейта В ФОНЕ
-    asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), asyncio.get_event_loop())
+    asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
     return "ok"
 
 @app_flask.route("/ping")
