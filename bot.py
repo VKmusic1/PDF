@@ -5,6 +5,7 @@ import asyncio
 import fitz                  # PyMuPDF
 import pdfplumber
 import pandas as pd
+from flask import Flask, request
 from telegram import (
     Update,
     InputFile,
@@ -20,7 +21,7 @@ from telegram.ext import (
     filters
 )
 from docx import Document
-from flask import Flask, request
+import requests
 
 # ---------------------- 1. Конфигурация из окружения ----------------------
 TOKEN = os.getenv("TOKEN")
@@ -38,10 +39,8 @@ WEBHOOK_URL = f"https://{HOST}/{TOKEN}"
 logging.basicConfig(format="%(asctime)s %(levelname)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------------------- 3. Flask + общий цикл ----------------------
-app_flask = Flask(__name__)
-
-# Создаём отдельный asyncio-цикл и делаем его текущим
+# ---------------------- 3. Создание единого asyncio-loop ----------------------
+# Создаем и устанавливаем главный event loop, чтобы Flask-обработчики могли ставить задачи в этот loop
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
@@ -52,7 +51,11 @@ telegram_app = (
     .connection_pool_size(100)
     .build()
 )
-# (Убираем попытку post_init, чтобы не было ошибки NoneType)
+# Оптимальные таймауты для HTTP-запросов в PTB
+telegram_app.request_kwargs = {
+    "read_timeout": 60,
+    "connect_timeout": 20
+}
 
 # ---------------------- 5. Функции для работы с PDF ----------------------
 def extract_pdf_elements(path: str):
@@ -90,7 +93,7 @@ def convert_to_word(elements, out_path: str):
             docx.add_picture(bio)
     docx.save(out_path)
 
-# ---------------------- 6. Обработчики ----------------------
+# ---------------------- 6. Обработчики Telegram ----------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -102,7 +105,7 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     При получении PDF:
      - сохраняем во /tmp
-     - показываем кнопки (короткие подписи):
+     - показываем кнопки:
          • Word: текст+картинки 📄
          • TXT: текст 📄
          • Excel: таблицы 📊
@@ -149,7 +152,7 @@ async def cb_text_only(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for block in text_only:
         for i in range(0, len(block), 4096):
             await context.bot.send_message(update.effective_chat.id, block[i:i+4096])
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.1)
 
 async def cb_chat_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -169,7 +172,7 @@ async def cb_chat_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if typ == "text":
             for i in range(0, len(content), 4096):
                 await context.bot.send_message(update.effective_chat.id, content[i:i+4096])
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.1)
         else:
             h = hash(content)
             if h in sent:
@@ -178,7 +181,7 @@ async def cb_chat_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bio = io.BytesIO(content)
             bio.name = "image.png"
             await context.bot.send_photo(update.effective_chat.id, photo=bio)
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.1)
 
 async def cb_word_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -200,15 +203,6 @@ async def cb_word_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update.effective_chat.id,
             document=InputFile(f, filename="full_converted.docx")
         )
-    # Кнопка "Новый PDF" после отправки
-    await asyncio.sleep(0.1)
-    await context.bot.send_message(
-        update.effective_chat.id,
-        "Что дальше?",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Новый PDF 🔄", callback_data="cb_new_pdf")]
-        ])
-    )
 
 async def cb_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -233,15 +227,6 @@ async def cb_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update.effective_chat.id,
             document=InputFile(f, filename="full_converted.txt")
         )
-    # Кнопка "Новый PDF" после отправки
-    await asyncio.sleep(0.1)
-    await context.bot.send_message(
-        update.effective_chat.id,
-        "Что дальше?",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Новый PDF 🔄", callback_data="cb_new_pdf")]
-        ])
-    )
 
 async def cb_tables(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -275,15 +260,6 @@ async def cb_tables(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update.effective_chat.id,
             document=InputFile(f, filename="tables.xlsx")
         )
-    # Кнопка "Новый PDF" после отправки
-    await asyncio.sleep(0.1)
-    await context.bot.send_message(
-        update.effective_chat.id,
-        "Что дальше?",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Новый PDF 🔄", callback_data="cb_new_pdf")]
-        ])
-    )
 
 async def cb_new_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -306,34 +282,34 @@ telegram_app.add_handler(CallbackQueryHandler(cb_tables,      pattern="cb_tables
 telegram_app.add_handler(CallbackQueryHandler(cb_new_pdf,     pattern="cb_new_pdf"))
 
 # ---------------------- 8. Flask-маршруты для Webhook и Ping ----------------------
+app_flask = Flask(__name__)
+
 @app_flask.route(f"/{TOKEN}", methods=["POST"])
 def telegram_webhook():
     """
     Этот маршрут Telegram будет POST-ить при каждом новом обновлении.
-    Мы помещаем update в очередь существующего asyncio loop PTB.
+    Ставим update в очередь нашего единственного loop через loop.create_task.
     """
     update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    # Запускаем обработку update в фоне, не блокируя Flask:
-    asyncio.get_event_loop().create_task(telegram_app.process_update(update))
+    loop.create_task(telegram_app.process_update(update))
     return "ok"
 
 @app_flask.route("/ping")
 def ping():
     """
-    Простая проверка “живости” приложения.
+    Простой маршрут для проверки, что сервис «живой».
     """
     return "pong"
 
-# ---------------------- 9. Запуск ----------------------
+# ---------------------- 9. Инициализация и запуск ----------------------
 if __name__ == "__main__":
     # Устанавливаем webhook в Telegram при старте
     logger.info(f"Setting webhook to {WEBHOOK_URL}")
-    import requests
     requests.post(
         f"https://api.telegram.org/bot{TOKEN}/setWebhook",
         data={"url": WEBHOOK_URL}
     )
 
+    # Запускаем Flask (тот же loop уже «в деле» для telegram_app)
     logger.info("Запускаем Flask на порту %s", PORT)
-    # Запускаем Flask (будет использовать тот же loop, где живёт PTB)
     app_flask.run(host="0.0.0.0", port=PORT)
