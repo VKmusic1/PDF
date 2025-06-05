@@ -3,7 +3,7 @@ import logging
 import asyncio
 from flask import Flask, request
 from telegram import Update
-from telegram.ext import Application, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 TOKEN = os.getenv("TOKEN")
 HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME")
@@ -11,19 +11,24 @@ PORT = int(os.getenv("PORT", "10000"))
 WEBHOOK_URL = f"https://{HOST}/{TOKEN}"
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 app_flask = Flask(__name__)
 
-telegram_app = Application.builder().token(TOKEN).build()
+telegram_app = (
+    Application.builder()
+    .token(TOKEN)
+    .connection_pool_size(10)
+    .build()
+)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привет! Это эхо-бот.")
+
+telegram_app.add_handler(CommandHandler("start", start))
+
 loop = asyncio.get_event_loop()
-
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("бот жив!")
-
-telegram_app.add_handler(MessageHandler(filters.ALL, echo))
-
 async def init_telegram():
     await telegram_app.initialize()
-
 loop.run_until_complete(init_telegram())
 
 @app_flask.route(f"/{TOKEN}", methods=["POST"])
@@ -42,4 +47,5 @@ if __name__ == "__main__":
         f"https://api.telegram.org/bot{TOKEN}/setWebhook",
         data={"url": WEBHOOK_URL}
     )
+    logger.info("Запускаем Flask на порту %s", PORT)
     app_flask.run(host="0.0.0.0", port=PORT)
