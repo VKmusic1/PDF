@@ -5,6 +5,7 @@ import asyncio
 import fitz  # PyMuPDF
 import pdfplumber
 import pandas as pd
+import openpyxl
 from flask import Flask, request
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
