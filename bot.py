@@ -19,6 +19,7 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
+from flask import Flask, request
 from docx import Document
 
 # ---------------------- 1. Конфигурация из окружения ----------------------
@@ -37,18 +38,19 @@ WEBHOOK_URL = f"https://{HOST}/{TOKEN}"
 logging.basicConfig(format="%(asctime)s %(levelname)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------------------- 3. Инициализация Telegram Application ----------------------
-telegram_app = (
-    Application.builder()
-    .token(TOKEN)
-    .connection_pool_size(100)
-    .build()
-)
-# Тайм-ауты для внутренних HTTP-запросов PTB (не передаются в сами send_*)
-telegram_app.request_kwargs = {
-    "read_timeout": 60,
-    "connect_timeout": 20
-}
+# ---------------------- 3. Инициализация Flask (для вебхука + ping) ----------------------
+app_flask = Flask(__name__)
+
+@app_flask.route(f"/{TOKEN}", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+    asyncio.run(telegram_app.process_update(update))
+    return "ok"
+
+@app_flask.route("/ping", methods=["GET"])
+def ping():
+    # Простая «пинг-понг» проверка
+    return "pong"
 
 # ---------------------- 4. Функции для работы с PDF ----------------------
 def extract_pdf_elements(path: str):
@@ -86,26 +88,23 @@ def convert_to_word(elements, out_path: str):
             docx.add_picture(bio)
     docx.save(out_path)
 
-# ---------------------- 5. Обработчики ----------------------
+# ---------------------- 5. Телеграмные хэндлеры ----------------------
+telegram_app = (
+    Application.builder()
+    .token(TOKEN)
+    .connection_pool_size(100)
+    .build()
+)
+# Тайм-ауты лишь для внутренних HTTP-запросов PTB
+telegram_app.request_kwargs = {
+    "read_timeout": 60,
+    "connect_timeout": 20
+}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /start
-    """
-    await update.message.reply_text("Привет! Отправь PDF-файл, и я предложу варианты извлечения.")
+    await update.message.reply_text("Привет! Отправь PDF-файл.")
 
 async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    При получении PDF:
-     - сохраняем во /tmp
-     - показываем кнопки выбора (с новыми подписями и смайлами):
-         • Скачать текст и картинки в Word 📄
-         • Скачать текст в TXT 📄
-         • Скачать Таблицу в Excel 📊
-         • Скачать просто текст в этот чат 📝
-         • Скачать текст и картинки в этот чат 🖼️📝
-         • Новый PDF 🔄
-    """
     logger.info("Получен документ от %s", update.effective_user.id)
     doc = update.message.document
     if not doc or doc.mime_type != "application/pdf":
@@ -117,11 +116,11 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [InlineKeyboardButton("Скачать текст и картинки в Word 📄", callback_data="cb_word_all")],
-        [InlineKeyboardButton("Скачать текст в TXT 📄", callback_data="cb_txt")],
-        [InlineKeyboardButton("Скачать Таблицу в Excel 📊", callback_data="cb_tables")],
+        [InlineKeyboardButton("Скачать текст в TXT 📄",           callback_data="cb_txt")],
+        [InlineKeyboardButton("Скачать Таблицу в Excel 📊",      callback_data="cb_tables")],
         [InlineKeyboardButton("Скачать просто текст в этот чат 📝", callback_data="cb_text_only")],
         [InlineKeyboardButton("Скачать текст и картинки в этот чат 🖼️📝", callback_data="cb_chat_all")],
-        [InlineKeyboardButton("Новый PDF 🔄", callback_data="cb_new_pdf")],
+        [InlineKeyboardButton("Новый PDF 🔄",                  callback_data="cb_new_pdf")],
     ]
     await update.message.reply_text(
         "Выбери, что сделать с этим PDF:",
@@ -129,9 +128,6 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def cb_text_only(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Вывести только текст в чат (страница за страницей), без кнопок.
-    """
     user = update.effective_user.id
     logger.info("Callback cb_text_only от %s", user)
     await update.callback_query.answer()
@@ -148,9 +144,6 @@ async def cb_text_only(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(0.1)
 
 async def cb_chat_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Вывести в чат текст и картинки (по порядку), без кнопок.
-    """
     user = update.effective_user.id
     logger.info("Callback cb_chat_all от %s", user)
     await update.callback_query.answer()
@@ -177,9 +170,6 @@ async def cb_chat_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(0.1)
 
 async def cb_word_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Конвертировать весь PDF (текст+картинки) в Word и отправить.
-    """
     user = update.effective_user.id
     logger.info("Callback cb_word_all от %s", user)
     await update.callback_query.answer()
@@ -198,9 +188,6 @@ async def cb_word_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def cb_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Положить весь текст в .txt и отправить.
-    """
     user = update.effective_user.id
     logger.info("Callback cb_txt от %s", user)
     await update.callback_query.answer()
@@ -222,9 +209,6 @@ async def cb_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def cb_tables(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Извлечь таблицы через pdfplumber в Excel и отправить.
-    """
     user = update.effective_user.id
     logger.info("Callback cb_tables от %s", user)
     await update.callback_query.answer()
@@ -246,7 +230,7 @@ async def cb_tables(update: Update, context: ContextTypes.DEFAULT_TYPE):
     excel_path = f"/tmp/{user}_tables.xlsx"
     with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
         for sheet_name, df in all_tables:
-            safe_name = sheet_name[:31]  # Excel ограничение: 31 символ
+            safe_name = sheet_name[:31]
             df.to_excel(writer, sheet_name=safe_name, index=False)
     with open(excel_path, "rb") as f:
         await context.bot.send_document(
@@ -255,9 +239,6 @@ async def cb_tables(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def cb_new_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Новый PDF: очищаем user_data и просим загрузить снова.
-    """
     user = update.effective_user.id
     logger.info("Callback cb_new_pdf от %s", user)
     await update.callback_query.answer()
@@ -274,7 +255,7 @@ telegram_app.add_handler(CallbackQueryHandler(cb_txt, pattern="cb_txt"))
 telegram_app.add_handler(CallbackQueryHandler(cb_tables, pattern="cb_tables"))
 telegram_app.add_handler(CallbackQueryHandler(cb_new_pdf, pattern="cb_new_pdf"))
 
-# ---------------------- 7. Запуск webhook ----------------------
+# ---------------------- 7. Запуск webhook (Flask + PTB) ----------------------
 if __name__ == "__main__":
     logger.info(f"Setting webhook to {WEBHOOK_URL}")
     telegram_app.run_webhook(
