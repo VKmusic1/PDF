@@ -5,7 +5,6 @@ import asyncio
 import fitz  # PyMuPDF
 import pdfplumber
 import pandas as pd
-import openpyxl
 from flask import Flask, request
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -35,8 +34,6 @@ telegram_app = (
     .build()
 )
 
-# =============== PDF UTILS ====================
-
 def extract_pdf_elements(path):
     doc = fitz.open(path)
     elements = []
@@ -60,7 +57,6 @@ def pdf_tables_to_excel(path, out_path):
                 tables.append(t)
     if not tables:
         return False
-    # Сохраняем первую таблицу в Excel
     df = pd.DataFrame(tables[0])
     df.to_excel(out_path, index=False)
     return True
@@ -82,8 +78,6 @@ def save_elements_to_txt(elements, out_path):
             if typ == "text":
                 f.write(content + "\n\n")
 
-# =============== BUTTONS ======================
-
 def make_main_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Word: текст+картинки 📝", callback_data="word_all")],
@@ -93,8 +87,6 @@ def make_main_keyboard():
         [InlineKeyboardButton("Чат: текст+картинки 🖼️📝", callback_data="chat_all")],
         [InlineKeyboardButton("Новый PDF 🔄", callback_data="new_pdf")]
     ])
-
-# ============= HANDLERS =======================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Привет! Отправь PDF-файл.")
@@ -117,7 +109,7 @@ async def cb_word_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     elements = context.user_data.get('elements')
     if not elements:
-        return await update.callback_query.edit_message_text("Нет данных для Word.")
+        return await update.callback_query.edit_message_text("Нет данных для Word.", reply_markup=make_main_keyboard())
     out = f"/tmp/{update.effective_user.id}.docx"
     save_elements_to_word(elements, out)
     with open(out, "rb") as f:
@@ -128,7 +120,7 @@ async def cb_txt_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     elements = context.user_data.get('elements')
     if not elements:
-        return await update.callback_query.edit_message_text("Нет данных для TXT.")
+        return await update.callback_query.edit_message_text("Нет данных для TXT.", reply_markup=make_main_keyboard())
     out = f"/tmp/{update.effective_user.id}.txt"
     save_elements_to_txt(elements, out)
     with open(out, "rb") as f:
@@ -151,7 +143,7 @@ async def cb_chat_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     elements = context.user_data.get('elements')
     if not elements:
-        return await update.callback_query.edit_message_text("Нет данных.")
+        return await update.callback_query.edit_message_text("Нет данных.", reply_markup=make_main_keyboard())
     for typ, content in elements:
         if typ == "text":
             for i in range(0, len(content), 4096):
@@ -162,7 +154,7 @@ async def cb_chat_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     elements = context.user_data.get('elements')
     if not elements:
-        return await update.callback_query.edit_message_text("Нет данных.")
+        return await update.callback_query.edit_message_text("Нет данных.", reply_markup=make_main_keyboard())
     sent = set()
     for typ, content in elements:
         if typ == "text":
@@ -192,9 +184,7 @@ telegram_app.add_handler(CallbackQueryHandler(cb_chat_text, pattern="chat_text")
 telegram_app.add_handler(CallbackQueryHandler(cb_chat_all, pattern="chat_all"))
 telegram_app.add_handler(CallbackQueryHandler(cb_new_pdf, pattern="new_pdf"))
 
-# =========== Flask + Webhook =============
-
-loop = asyncio.get_event_loop()
+loop = telegram_app.loop
 
 async def init_telegram():
     await telegram_app.initialize()
@@ -204,7 +194,6 @@ loop.run_until_complete(init_telegram())
 @app_flask.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    # НЕ ЖДЁМ ОТВЕТА, сразу отдаём "ok"!
     asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
     return "ok"
 
