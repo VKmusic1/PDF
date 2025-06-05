@@ -41,8 +41,7 @@ logger = logging.getLogger(__name__)
 # ---------------------- 3. Flask + общий цикл ----------------------
 app_flask = Flask(__name__)
 
-# Создаём свой loop и устанавливаем его как текущий
-# Это позволит нам из любого потока (Flask) запускать async-функции PTB
+# Создаём отдельный asyncio-цикл и делаем его текущим
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
@@ -53,9 +52,7 @@ telegram_app = (
     .connection_pool_size(100)
     .build()
 )
-# Увеличиваем тайм-ауты HTTP-запросов PTB (Telegram API может долго отвечать)
-# (прямой доступ к request_kwargs устарел, поэтому устанавливаем через defaults)
-telegram_app.post_init(lambda app: setattr(app.bot.http, "timeout", 60))
+# (Убираем попытку post_init, чтобы не было ошибки NoneType)
 
 # ---------------------- 5. Функции для работы с PDF ----------------------
 def extract_pdf_elements(path: str):
@@ -203,7 +200,7 @@ async def cb_word_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update.effective_chat.id,
             document=InputFile(f, filename="full_converted.docx")
         )
-    # После отправки можно показать кнопки заново:
+    # Кнопка "Новый PDF" после отправки
     await asyncio.sleep(0.1)
     await context.bot.send_message(
         update.effective_chat.id,
