@@ -2,10 +2,15 @@ import os
 import io
 import logging
 import asyncio
-import fitz  # PyMuPDF
+import fitz                  # PyMuPDF
 import pdfplumber
 import pandas as pd
-from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -16,9 +21,7 @@ from telegram.ext import (
 )
 from docx import Document
 
-# ————————————————————
-# 1. Конфигурация из окружения
-# ————————————————————
+# ---------------------- 1. Конфигурация из окружения ----------------------
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("Environment variable TOKEN is required")
@@ -30,32 +33,29 @@ if not HOST:
 PORT = int(os.getenv("PORT", "10000"))
 WEBHOOK_URL = f"https://{HOST}/{TOKEN}"
 
-# ————————————————————
-# 2. Логирование
-# ————————————————————
+# ---------------------- 2. Логирование ----------------------
 logging.basicConfig(format="%(asctime)s %(levelname)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ————————————————————
-# 3. Инициализация Telegram Application
-# ————————————————————
+# ---------------------- 3. Инициализация Telegram Application ----------------------
 telegram_app = (
     Application.builder()
     .token(TOKEN)
     .connection_pool_size(100)
     .build()
 )
-# Устанавливаем тайм-ауты на произвольные запросы
+# Увеличиваем тайм­-ауты для всех запросов к API (send_document, send_photo и т.п.)
 telegram_app.request_kwargs = {
     "read_timeout": 60,
     "connect_timeout": 20
 }
 
-# ————————————————————
-# 4. Функции для работы с PDF
-# ————————————————————
-
+# ---------------------- 4. Функции для работы с PDF ----------------------
 def extract_pdf_elements(path: str):
+    """
+    Открывает PDF через PyMuPDF, возвращает список элементов:
+    ('text', строка текста) или ('img', bytes_изображения).
+    """
     doc = fitz.open(path)
     elements = []
     for page in doc:
@@ -70,8 +70,14 @@ def extract_pdf_elements(path: str):
     return elements
 
 async def send_elements(update: Update, context: ContextTypes.DEFAULT_TYPE, elements):
+    """
+    Проходит по списку elements и отправляет текст (по 4096 символов за раз)
+    и картинки. После этого выводит четыре кнопки: Скачать Word, Скачать TXT,
+    Скачать таблицы, Новый PDF + подпись "/start".
+    """
     sent = set()
     chat_id = update.effective_chat.id
+
     for typ, content in elements:
         if typ == "text":
             text = content
@@ -92,7 +98,7 @@ async def send_elements(update: Update, context: ContextTypes.DEFAULT_TYPE, elem
         [InlineKeyboardButton("Скачать в Word 💾", callback_data="download_word")],
         [InlineKeyboardButton("Скачать в TXT 📄", callback_data="download_txt")],
         [InlineKeyboardButton("Скачать таблицы 📊", callback_data="download_tables")],
-        [InlineKeyboardButton("Новый PDF 🔖", callback_data="new_pdf")],
+        [InlineKeyboardButton("Новый PDF 🔖", callback_data="new_pdf")]
     ]
     await context.bot.send_message(
         chat_id,
@@ -102,8 +108,10 @@ async def send_elements(update: Update, context: ContextTypes.DEFAULT_TYPE, elem
     )
     await context.bot.send_message(chat_id, "Чтобы пользоваться ботом, нажмите /start", timeout=60)
 
-# Конвертация в Word
 def convert_to_word(elements, out_path: str):
+    """
+    Конвертирует список элементов в DOCX: текст – параграфы, изображения – в файл.
+    """
     docx = Document()
     for typ, content in elements:
         if typ == "text":
@@ -114,65 +122,81 @@ def convert_to_word(elements, out_path: str):
             docx.add_picture(bio)
     docx.save(out_path)
 
-# ————————————————————
-# 5. Обработчики команд и callback
-# ————————————————————
+# ---------------------- 5. Обработчики команд и callback ----------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /start
+    """
     await update.message.reply_text("Привет! Отправь PDF-файл.")
 
 async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обработчик прихода PDF. Сохраняет локально и предлагает выбрать:
+    «Только текст» или «Текст + картинки».
+    """
+    logger.info("Получен документ от %s", update.effective_user.id)
     doc = update.message.document
-    if doc.mime_type != "application/pdf":
-        return await update.message.reply_text("Пожалуйста, отправьте PDF.")
-
+    if not doc or doc.mime_type != "application/pdf":
+        return await update.message.reply_text("Пожалуйста, отправьте PDF-файл.")
     file = await doc.get_file()
     path = f"/tmp/{doc.file_unique_id}.pdf"
     await file.download_to_drive(path)
     context.user_data["pdf_path"] = path
 
+    # Предлагаем выбор
     await update.message.reply_text(
-        "Выберите, что извлечь:",
+        "Выберите, что извлечь из PDF:",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("Только текст", callback_data="only_text")],
             [InlineKeyboardButton("Текст + картинки", callback_data="text_images")]
-        ])
+        ]),
+        timeout=60
     )
 
 async def only_text_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    При нажатии «Только текст» — извлекаем только текстовые элементы и отправляем их.
+    """
+    logger.info("Callback only_text от %s", update.effective_user.id)
     await update.callback_query.answer()
     path = context.user_data.get("pdf_path")
     if not path:
         return await update.callback_query.edit_message_text("Файл не найден.")
-
     elements = extract_pdf_elements(path)
     text_only = [(t, c) for t, c in elements if t == "text"]
     context.user_data["elements"] = text_only
     await send_elements(update, context, text_only)
 
 async def text_images_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    При нажатии «Текст + картинки» — отправляем оба типа элементов.
+    """
+    logger.info("Callback text_images от %s", update.effective_user.id)
     await update.callback_query.answer()
     path = context.user_data.get("pdf_path")
     if not path:
         return await update.callback_query.edit_message_text("Файл не найден.")
-
     elements = extract_pdf_elements(path)
     context.user_data["elements"] = elements
     await send_elements(update, context, elements)
 
 async def download_txt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    «Скачать в TXT» — собираем весь текст из сохранённых элементов,
+    записываем в .txt, отсылаем.
+    """
+    logger.info("Callback download_txt от %s", update.effective_user.id)
     await update.callback_query.answer()
     elements = context.user_data.get("elements", [])
     if not elements:
         return await update.callback_query.edit_message_text("Нет данных для конвертации.")
-
     all_text = ""
     for typ, content in elements:
         if typ == "text":
             all_text += content + "\n\n"
     if not all_text:
         return await update.callback_query.edit_message_text("В PDF нет текста.")
-
     out_path = f"/tmp/{update.effective_user.id}.txt"
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(all_text)
@@ -184,11 +208,14 @@ async def download_txt_callback(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
 async def download_word_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    «Скачать в Word» — конвертируем элементы в DOCX и отсылаем.
+    """
+    logger.info("Callback download_word от %s", update.effective_user.id)
     await update.callback_query.answer()
     elements = context.user_data.get("elements", [])
     if not elements:
         return await update.callback_query.edit_message_text("Нет данных для конвертации.")
-
     out = f"/tmp/{update.effective_user.id}.docx"
     convert_to_word(elements, out)
     with open(out, "rb") as f:
@@ -199,11 +226,15 @@ async def download_word_callback(update: Update, context: ContextTypes.DEFAULT_T
         )
 
 async def download_tables_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    «Скачать таблицы» — ищем все таблицы в PDF при помощи pdfplumber,
+    складываем их в один Excel (каждая таблица на отдельном листе) и отправляем.
+    """
+    logger.info("Callback download_tables от %s", update.effective_user.id)
     await update.callback_query.answer()
     path = context.user_data.get("pdf_path")
     if not path:
         return await update.callback_query.edit_message_text("PDF не найден.")
-
     all_tables = []
     with pdfplumber.open(path) as pdf:
         for page_number, page in enumerate(pdf.pages, start=1):
@@ -217,13 +248,11 @@ async def download_tables_callback(update: Update, context: ContextTypes.DEFAULT
 
     if not all_tables:
         return await update.callback_query.edit_message_text("В PDF нет распознаваемых таблиц.")
-
     excel_path = f"/tmp/{update.effective_user.id}_tables.xlsx"
     with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
         for sheet_name, df in all_tables:
             safe_name = sheet_name[:31]
             df.to_excel(writer, sheet_name=safe_name, index=False)
-
     with open(excel_path, "rb") as f:
         await context.bot.send_document(
             update.effective_chat.id,
@@ -232,13 +261,15 @@ async def download_tables_callback(update: Update, context: ContextTypes.DEFAULT
         )
 
 async def new_pdf_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    «Новый PDF» — очищаем user_data и просим загрузить новый.
+    """
+    logger.info("Callback new_pdf от %s", update.effective_user.id)
     await update.callback_query.answer()
     context.user_data.clear()
-    await context.bot.send_message(update.effective_chat.id, "Отправьте новый PDF-файл.")
+    await context.bot.send_message(update.effective_chat.id, "Отправьте новый PDF-файл.", timeout=60)
 
-# ————————————————————
-# 6. Регистрация хендлеров
-# ————————————————————
+# ---------------------- 6. Регистрация хендлеров ----------------------
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
 telegram_app.add_handler(CallbackQueryHandler(only_text_callback, pattern="only_text"))
@@ -248,9 +279,7 @@ telegram_app.add_handler(CallbackQueryHandler(download_txt_callback, pattern="do
 telegram_app.add_handler(CallbackQueryHandler(download_tables_callback, pattern="download_tables"))
 telegram_app.add_handler(CallbackQueryHandler(new_pdf_callback, pattern="new_pdf"))
 
-# ————————————————————
-# 7. Запуск webhook
-# ————————————————————
+# ---------------------- 7. Запуск webhook ----------------------
 if __name__ == "__main__":
     logger.info(f"Setting webhook to {WEBHOOK_URL}")
     telegram_app.run_webhook(
