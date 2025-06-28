@@ -1,165 +1,237 @@
 import os
 import io
 import logging
-import time
-import asyncio
-import threading
-
-import fitz
+import fitz                  # PyMuPDF
 import pdfplumber
 import pandas as pd
-from flask import Flask, request
-from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from pdf2docx import Converter
+from telegram import (
+    Update,
+    InputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters
 )
 from docx import Document
-from pdf2docx import Converter
-import requests
+from flask import Flask, request
+import asyncio
 
-# 1. Конфиг
+# ---------------------- 1. Конфигурация из окружения ----------------------
 TOKEN = os.getenv("TOKEN")
-HOST  = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-PORT  = int(os.getenv("PORT", "10000"))
-if not TOKEN or not HOST:
-    raise RuntimeError("TOKEN и RENDER_EXTERNAL_HOSTNAME обязательны")
+if not TOKEN:
+    raise RuntimeError("Environment variable TOKEN is required")
+
+HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+if not HOST:
+    raise RuntimeError("Environment variable RENDER_EXTERNAL_HOSTNAME is required")
+
+PORT = int(os.getenv("PORT", "10000"))
 WEBHOOK_URL = f"https://{HOST}/{TOKEN}"
 
-# 2. Лог
+# ---------------------- 2. Логирование ----------------------
 logging.basicConfig(format="%(asctime)s %(levelname)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 3. Flask
+# ---------------------- 3. Инициализация Flask & Telegram ----------------------
 app = Flask(__name__)
-
-# 4. asyncio-loop
-telegram_loop = asyncio.new_event_loop()
-def start_loop(loop):
-    asyncio.set_event_loop(loop)
-    loop.run_forever()
-threading.Thread(target=start_loop, args=(telegram_loop,), daemon=True).start()
-
-# 5. Telegram-app
 telegram_app = (
     Application.builder()
     .token(TOKEN)
     .connection_pool_size(100)
     .build()
 )
-telegram_app.request_kwargs = {"read_timeout":60,"connect_timeout":20}
-future = asyncio.run_coroutine_threadsafe(telegram_app.initialize(), telegram_loop)
-future.result(timeout=15)
-logger.info("✔ Telegram initialized")
 
-# 6. PDF-утилиты
-def extract_pdf_elements(path):
+# ---------------------- 4. PDF-утилиты ----------------------
+
+def extract_pdf_elements(path: str):
     doc = fitz.open(path)
-    elems=[]
+    elements = []
     for page in doc:
-        txt=page.get_text().strip()
-        if txt: elems.append(("text",txt))
+        text = page.get_text().strip()
+        if text:
+            elements.append(("text", text))
         for img in page.get_images(full=True):
-            data=doc.extract_image(img[0])["image"]
-            elems.append(("img",data))
+            xref = img[0]
+            data = doc.extract_image(xref)["image"]
+            elements.append(("img", data))
     doc.close()
-    return elems
+    return elements
 
-def save_txt(elems,out):
-    with open(out,"w",encoding="utf-8") as f:
-        for t,c in elems:
-            if t=="text": f.write(c+"\n\n")
+def convert_to_word(elements, out_path: str):
+    docx = Document()
+    for typ, content in elements:
+        if typ == "text":
+            docx.add_paragraph(content)
+        else:
+            bio = io.BytesIO(content)
+            bio.name = "image.png"
+            docx.add_picture(bio)
+    docx.save(out_path)
 
-def convert_pdf_to_docx(pdf_path, docx_path):
-    cv=Converter(pdf_path)
-    cv.convert(docx_path, start=0, end=None)
-    cv.close()
+def pdf_tables_to_excel(path: str, out_path: str):
+    tables = []
+    with pdfplumber.open(path) as pdf:
+        for page in pdf.pages:
+            t = page.extract_table()
+            if t:
+                tables.append(t)
+    if not tables:
+        return False
+    df = pd.DataFrame(tables[0])
+    df.to_excel(out_path, index=False)
+    return True
 
-# 7. Handlers
-async def start(u, c):
-    await u.message.reply_text("Привет! Отправь PDF-файл.")
+def save_elements_to_txt(elements, out_path: str):
+    with open(out_path, "w", encoding="utf-8") as f:
+        for typ, content in elements:
+            if typ == "text":
+                f.write(content + "\n\n")
 
-async def handle_pdf(u, c):
-    doc=u.message.document
-    if not doc or doc.mime_type!="application/pdf":
-        return await u.message.reply_text("Нужен PDF.")
-    tgfile=await doc.get_file()
-    path=f"/tmp/{doc.file_unique_id}.pdf"
-    await tgfile.download_to_drive(path)
-    elems=extract_pdf_elements(path)
-    c.user_data["pdf_path"]=path
-    c.user_data["elements"]=elems
-    kb=[
-      [InlineKeyboardButton("Word: макет 📄",callback_data="cb_word_all")],
-      [InlineKeyboardButton("TXT: текст 📄",callback_data="cb_txt")],
-      [InlineKeyboardButton("Excel: таблицы 📊",callback_data="cb_tables")],
-      [InlineKeyboardButton("Чат: текст 📝",callback_data="cb_text_only")],
-      [InlineKeyboardButton("Чат: текст+картинки 🖼️📝",callback_data="cb_chat_all")],
-      [InlineKeyboardButton("Новый PDF 🔄",callback_data="cb_new_pdf")],
-    ]
-    await u.message.reply_text("Выбери:", reply_markup=InlineKeyboardMarkup(kb))
+# ---------------------- 5. Клавиатура ----------------------
 
-# остальные cb_* без изменений ...
+def make_main_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Word: макет 📄",     callback_data="cb_word_layout")],
+        [InlineKeyboardButton("Word: текст+картинки 📝", callback_data="cb_word_all")],
+        [InlineKeyboardButton("TXT: текст 📄",      callback_data="cb_txt")],
+        [InlineKeyboardButton("Excel: таблицы 📊",  callback_data="cb_tables")],
+        [InlineKeyboardButton("Чат: текст 📝",      callback_data="cb_text_only")],
+        [InlineKeyboardButton("Чат: текст+картинки 🖼️📝", callback_data="cb_chat_all")],
+        [InlineKeyboardButton("Новый PDF 🔄",       callback_data="cb_new_pdf")],
+    ])
 
-async def cb_word_all(u, c):
-    await u.callback_query.answer()
-    path=c.user_data.get("pdf_path")
-    if not path:
-        return await c.bot.send_message(u.effective_chat.id,"Сначала PDF")
-    # 1) отправляем сообщение с 0%
-    msg = await c.bot.send_message(u.effective_chat.id, "⏳ Конвертация: 0%")
-    start_ts = time.time()
-    # 2) запускаем прогресс-обновления
-    async def updater():
-        while True:
-            elapsed = time.time()-start_ts
-            pct = min(int(elapsed/240*100), 99)
-            try:
-                await c.bot.edit_message_text(f"⏳ Конвертация: {pct}%", u.effective_chat.id, msg.message_id)
-            except:
-                pass
-            if pct>=99:
-                break
-            await asyncio.sleep(15)
-    task = asyncio.create_task(updater())
-    # 3) сам конверт
-    out = f"/tmp/{u.effective_user.id}_layout.docx"
-    convert_pdf_to_docx(path, out)
-    # 4) отменяем прогресс
-    task.cancel()
-    # 5) редактируем финальное сообщение
-    try:
-        await c.bot.edit_message_text("✅ Конвертация завершена!", u.effective_chat.id, msg.message_id)
-    except:
-        pass
-    # 6) отправляем файл
-    with open(out,"rb") as f:
-        await c.bot.send_document(u.effective_chat.id, InputFile(f,filename="layout.docx"))
+# ---------------------- 6. Хендлеры ----------------------
 
-# ... остальные cb_txt, cb_tables, cb_text_only, cb_chat_all, cb_new_pdf ...
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привет! Отправь PDF-файл.")
 
-# регистрация
-telegram_app.add_handler(CommandHandler("start",start))
-telegram_app.add_handler(MessageHandler(filters.Document.PDF,handle_pdf))
-telegram_app.add_handler(CallbackQueryHandler(cb_word_all,pattern="cb_word_all"))
-# и т.д. для остальных
+async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    doc = update.message.document
+    if not doc or doc.mime_type != "application/pdf":
+        return await update.message.reply_text("Пожалуйста, отправь PDF.")
+    file = await doc.get_file()
+    path = f"/tmp/{doc.file_unique_id}.pdf"
+    await file.download_to_drive(path)
+    context.user_data["pdf_path"] = path
+    await update.message.reply_text(
+        "Выбери вариант работы с этим PDF:",
+        reply_markup=make_main_keyboard()
+    )
 
-# 8. Flask‐routes
-@app.route(f"/{TOKEN}",methods=["POST"])
-def webhook():
-    data=request.get_json(force=True)
-    upd=Update.de_json(data,telegram_app.bot)
-    asyncio.run_coroutine_threadsafe(telegram_app.process_update(upd), telegram_loop)
-    return "OK"
+# ——— Новый хендлер: «макет» через pdf2docx ———
+
+async def cb_word_layout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    user = update.effective_user.id
+    pdf_path = context.user_data.get("pdf_path")
+    if not pdf_path:
+        return await context.bot.send_message(update.effective_chat.id, "Сначала отправь PDF.")
+    out_path = f"/tmp/{user}_layout.docx"
+    logger.info("Layout conversion %s → %s", pdf_path, out_path)
+
+    # Конвертация «макета»
+    converter = Converter(pdf_path)
+    converter.convert(out_path, start=0, end=None)
+    converter.close()
+
+    # Отправка
+    with open(out_path, "rb") as f:
+        await context.bot.send_document(
+            update.effective_chat.id,
+            document=InputFile(f, filename="layout_converted.docx")
+        )
+
+# ——— Остальные коллбеки (Word All, TXT, Excel, Чат) ———
+
+async def cb_word_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    elems = extract_pdf_elements(context.user_data.get("pdf_path", ""))
+    out = f"/tmp/{update.effective_user.id}_all.docx"
+    convert_to_word(elems, out)
+    with open(out, "rb") as f:
+        await context.bot.send_document(update.effective_chat.id, document=InputFile(f, "all_converted.docx"))
+
+async def cb_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    elems = extract_pdf_elements(context.user_data.get("pdf_path", ""))
+    out = f"/tmp/{update.effective_user.id}.txt"
+    save_elements_to_txt(elems, out)
+    with open(out, "rb") as f:
+        await context.bot.send_document(update.effective_chat.id, document=InputFile(f, "converted.txt"))
+
+async def cb_tables(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    pdf_path = context.user_data.get("pdf_path")
+    out = f"/tmp/{update.effective_user.id}.xlsx"
+    if pdf_tables_to_excel(pdf_path, out):
+        with open(out, "rb") as f:
+            await context.bot.send_document(update.effective_chat.id, document=InputFile(f, "tables.xlsx"))
+    else:
+        await context.bot.send_message(update.effective_chat.id, "В PDF нет таблиц.", reply_markup=make_main_keyboard())
+
+async def cb_text_only(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    elems = extract_pdf_elements(context.user_data.get("pdf_path", ""))
+    for typ, content in elems:
+        if typ == "text":
+            for i in range(0, len(content), 4096):
+                await context.bot.send_message(update.effective_chat.id, content[i:i+4096])
+
+async def cb_chat_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    sent = set()
+    elems = extract_pdf_elements(context.user_data.get("pdf_path", ""))
+    for typ, content in elems:
+        if typ == "text":
+            for i in range(0, len(content), 4096):
+                await context.bot.send_message(update.effective_chat.id, content[i:i+4096])
+        else:
+            h = hash(content)
+            if h in sent:
+                continue
+            sent.add(h)
+            bio = io.BytesIO(content); bio.name = "image.png"
+            await context.bot.send_photo(update.effective_chat.id, photo=bio)
+
+async def cb_new_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    context.user_data.clear()
+    await context.bot.send_message(update.effective_chat.id, "Отправь новый PDF.")
+
+# ——— Регистрация хендлеров ———
+
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
+telegram_app.add_handler(CallbackQueryHandler(cb_word_layout, pattern="cb_word_layout"))
+telegram_app.add_handler(CallbackQueryHandler(cb_word_all,    pattern="cb_word_all"))
+telegram_app.add_handler(CallbackQueryHandler(cb_txt,         pattern="cb_txt"))
+telegram_app.add_handler(CallbackQueryHandler(cb_tables,      pattern="cb_tables"))
+telegram_app.add_handler(CallbackQueryHandler(cb_text_only,   pattern="cb_text_only"))
+telegram_app.add_handler(CallbackQueryHandler(cb_chat_all,    pattern="cb_chat_all"))
+telegram_app.add_handler(CallbackQueryHandler(cb_new_pdf,     pattern="cb_new_pdf"))
+
+# ---------------------- 7. Ping-pong & Webhook ----------------------
 
 @app.route("/ping")
 def ping():
     return "pong"
 
-# 9. Запуск
-if __name__=="__main__":
-    logger.info(f"Setting webhook to {WEBHOOK_URL}")
-    r=requests.post(f"https://api.telegram.org/bot{TOKEN}/setWebhook",data={"url":WEBHOOK_URL})
-    logger.info("Webhook set" if r.ok else f"Webhook error: {r.text}")
-    logger.info("Run Flask on port %s",PORT)
-    app.run(host="0.0.0.0",port=PORT)
+@app.route(f"/{TOKEN}", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+    # ставим в текущий loop задачу на обработку, не блокируем Flask
+    asyncio.get_event_loop().create_task(telegram_app.process_update(update))
+    return "ok"
+
+if __name__ == "__main__":
+    logger.info("Устанавливаем webhook %s", WEBHOOK_URL)
+    telegram_app.bot.set_webhook(WEBHOOK_URL)
+    logger.info("Запускаем Flask на порту %s", PORT)
+    app.run(host="0.0.0.0", port=PORT)
